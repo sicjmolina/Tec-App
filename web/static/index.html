@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Mantenimientos Preventivos — Sicolsa</title>
+  <link rel="stylesheet" href="/static/css/app.css"/>
+</head>
+<body>
+
+<!-- ── TOPBAR ─────────────────────────────────────────────────── -->
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="topbar-brand">— SICOLSA — IT</span>
+    <span class="topbar-title">Mantenimientos Preventivos</span>
+  </div>
+  <div class="topbar-right">
+    <label class="toggle-wrap" id="togglePruebaWrap" title="Activar/desactivar modo prueba">
+      <input type="checkbox" id="chkPrueba"/>
+      <span class="toggle-track">
+        <span class="toggle-thumb"></span>
+      </span>
+      <span class="toggle-label" id="togglePruebaLabel">REAL</span>
+    </label>
+    <button class="btn btn-ghost" id="btnInventario">📦 Inventario</button>
+    <button class="btn btn-ghost" id="btnConfig">⚙ Config</button>
+  </div>
+</header>
+
+<!-- ── STATUS BAR ─────────────────────────────────────────────── -->
+<div class="statusbar" id="statusbar">
+  <span id="statusMsg">Listo</span>
+  <span id="modoLabel" class="status-warning">● MODO PRUEBA — no se crean tickets ni eventos reales</span>
+</div>
+
+<!-- ── MAIN ───────────────────────────────────────────────────── -->
+<main class="main-layout">
+
+  <!-- LEFT: mes anterior -->
+  <aside class="panel-left" id="panelAnterior">
+    <p class="section-label">MES ANTERIOR</p>
+    <p class="muted">Carga los equipos para ver el estado del mes anterior.</p>
+  </aside>
+
+  <!-- RIGHT: mes actual -->
+  <section class="panel-right">
+
+    <div class="panel-header">
+      <span class="section-label" id="labelMesActual">MES ACTUAL</span>
+      <span class="badge-done" id="badgeDone"></span>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <button class="btn btn-primary" id="btnCargar">▶ Cargar equipos desde GLPI</button>
+      <button class="btn btn-success" id="btnConfirmar" disabled>✓ Crear tickets y eventos en Outlook</button>
+      <span class="status-inline" id="statusInline"></span>
+    </div>
+
+    <!-- Cuota info — stats visuales -->
+    <div class="cuota-stats hidden" id="cuotaStats">
+      <div class="cuota-stat" id="cstatTotal">
+        <span class="cuota-stat-num">—</span>
+        <span class="cuota-stat-lbl">INVENTARIO</span>
+      </div>
+      <div class="cuota-stat-sep">÷12 =</div>
+      <div class="cuota-stat" id="cstatCuota">
+        <span class="cuota-stat-num">—</span>
+        <span class="cuota-stat-lbl">CUOTA MES</span>
+      </div>
+      <div class="cuota-stat-sep">·</div>
+      <div class="cuota-stat" id="cstatTickets">
+        <span class="cuota-stat-num">—</span>
+        <span class="cuota-stat-lbl">CON TICKET</span>
+      </div>
+      <div class="cuota-stat-sep">·</div>
+      <div class="cuota-stat" id="cstatPendientes">
+        <span class="cuota-stat-num">—</span>
+        <span class="cuota-stat-lbl">PENDIENTES</span>
+      </div>
+    </div>
+
+    <!-- Lista de equipos -->
+    <div class="equipos-scroll" id="equiposList"></div>
+
+  </section>
+</main>
+
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Configuración
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalConfig">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Configuración</h2>
+      <button class="btn-close" id="btnCloseConfig">✕</button>
+    </div>
+
+    <div class="modal-tabs">
+      <button class="tab-btn active" data-tab="glpi">GLPI</button>
+      <button class="tab-btn" data-tab="azure">Azure / Outlook</button>
+    </div>
+
+    <div class="tab-content" id="tabGlpi">
+      <div class="field-group">
+        <label>URL de GLPI</label>
+        <input type="text" id="cfg_glpi_url" placeholder="https://glpi.empresa.com/apirest.php"/>
+      </div>
+      <div class="field-group">
+        <label>App-Token</label>
+        <input type="password" id="cfg_glpi_app_token"/>
+      </div>
+      <div class="field-group">
+        <label>User-Token</label>
+        <input type="password" id="cfg_glpi_user_token"/>
+      </div>
+      <div class="field-group">
+        <label>ID Categoría mant.</label>
+        <input type="text" id="cfg_glpi_category_id" placeholder="22"/>
+      </div>
+      <div class="field-group">
+        <label>ID Campo fecha último mant.</label>
+        <input type="text" id="cfg_glpi_field_id" placeholder="76670"/>
+      </div>
+    </div>
+
+    <div class="tab-content hidden" id="tabAzure">
+
+      <div class="cfg-section-title">Aplicación Azure AD</div>
+      <div class="field-group">
+        <label>Client ID</label>
+        <input type="text" id="cfg_azure_client_id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>
+      </div>
+      <div class="field-group">
+        <label>Client Secret</label>
+        <input type="password" id="cfg_azure_client_secret" placeholder="Valor del secreto (no el ID)"/>
+      </div>
+      <div class="field-group">
+        <label>Tenant ID</label>
+        <input type="text" id="cfg_azure_tenant_id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"/>
+      </div>
+
+      <div class="cfg-section-title" style="margin-top:18px">Calendario Outlook</div>
+      <div class="field-group">
+        <label>UPN / email del buzón que crea los eventos</label>
+        <input type="text" id="cfg_outlook_user_upn" placeholder="usuario@sicolsa.com"/>
+        <span class="field-hint">Email del usuario cuyo calendario se usa. Requerido con tokens de aplicación.</span>
+      </div>
+      <div class="field-group">
+        <label>Calendar ID</label>
+        <input type="text" id="cfg_outlook_calendar_id" placeholder="AAMk..."/>
+        <span class="field-hint">ID del calendario de Outlook. Déjalo vacío para usar el calendario principal.</span>
+      </div>
+      <div class="field-group">
+        <label>Calendario detectado (selector)</label>
+        <select id="cfg_outlook_calendar_pick">
+          <option value="">— Ejecuta "Probar conexión Outlook" para cargar —</option>
+        </select>
+        <span class="field-hint">Selecciona un calendario para autocompletar el campo Calendar ID.</span>
+      </div>
+
+      <div class="cfg-section-title" style="margin-top:18px">Notificaciones por correo</div>
+      <div class="field-group">
+        <label>Destinatarios (separados por coma)</label>
+        <input type="text" id="cfg_notify_emails" placeholder="jefe@sicolsa.com, tecnico@sicolsa.com"/>
+        <span class="field-hint">Se envía un correo al crear tickets y se agregan como asistentes al evento.</span>
+      </div>
+
+      <!-- Botón probar conexión -->
+      <div style="margin-top:16px;display:flex;align-items:center;gap:12px">
+        <button class="btn btn-ghost" id="btnTestOutlook">⚡ Probar conexión Outlook</button>
+        <button class="btn btn-ghost" id="btnTestOutlookEvent">🧪 Probar crear/eliminar evento</button>
+        <span id="testOutlookResult" style="font-size:12px;font-family:var(--mono)"></span>
+      </div>
+      <div id="testOutlookCalendars" style="margin-top:10px;font-size:11px;color:var(--muted)"></div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="btnCancelConfig">Cancelar</button>
+      <button class="btn btn-primary" id="btnSaveConfig">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Confirmar acción
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalConfirmar">
+  <div class="modal modal-sm">
+    <div class="modal-header">
+      <h2 id="modalConfTitle">Confirmar</h2>
+    </div>
+    <p id="modalConfMsg" style="padding:0 24px 16px;color:var(--text);line-height:1.6"></p>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="btnConfNo">Cancelar</button>
+      <button class="btn btn-primary" id="btnConfYes">Continuar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Checklist mantenimiento
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalChecklist">
+  <div class="modal modal-checklist">
+    <div class="modal-header">
+      <div>
+        <h2 id="checklistTitle">Mantenimiento Preventivo</h2>
+        <p id="checklistSubtitle" style="font-size:12px;color:var(--muted);margin-top:3px"></p>
+      </div>
+      <button class="btn-close" id="btnCloseChecklist">✕</button>
+    </div>
+
+    <!-- Progreso -->
+    <div class="checklist-progress-wrap">
+      <div class="checklist-progress-bar">
+        <div class="checklist-progress-fill" id="checkProgressFill"></div>
+      </div>
+      <span class="checklist-progress-label" id="checkProgressLabel">0 / 20</span>
+    </div>
+
+    <!-- Items por categoría -->
+    <div class="checklist-body" id="checklistBody"></div>
+
+    <!-- Notas -->
+    <div class="checklist-notas">
+      <label>Notas del técnico (opcional)</label>
+      <textarea id="checklistNotas" placeholder="Observaciones, incidencias encontradas, acciones adicionales..."></textarea>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="btnCancelChecklist">Cancelar</button>
+      <button class="btn btn-ghost" id="btnCheckAll">Marcar todo ✓</button>
+      <button class="btn btn-ghost" id="btnEditChecklist" title="Personalizar los ítems del checklist">✏ Editar lista</button>
+      <button class="btn btn-success" id="btnSubmitChecklist" disabled>
+        Confirmar y cerrar ticket
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Editor de checklist
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalEditChecklist">
+  <div class="modal modal-edit-checklist">
+
+    <div class="modal-header">
+      <div>
+        <h2>Editar Checklist</h2>
+        <p style="font-size:12px;color:var(--muted);margin-top:3px">
+          Arrastra para reordenar · Edita texto e categoría · Agrega o elimina items
+        </p>
+      </div>
+      <button class="btn-close" id="btnCloseEditChecklist">✕</button>
+    </div>
+
+    <!-- Toolbar del editor -->
+    <div class="edit-checklist-toolbar">
+      <button class="btn btn-primary btn-sm" id="btnAddItem">+ Agregar item</button>
+      <div style="flex:1"></div>
+      <button class="btn btn-ghost btn-sm" id="btnResetChecklist">↺ Restaurar predeterminado</button>
+    </div>
+
+    <!-- Lista editable -->
+    <div class="edit-checklist-body" id="editChecklistBody"></div>
+
+    <!-- Form nueva categoría / item rápido -->
+    <div class="edit-checklist-add hidden" id="addItemForm">
+      <div class="add-item-row">
+        <input type="text" id="newItemCategoria" placeholder="Categoría (ej: Hardware)"/>
+        <input type="text" id="newItemTexto"     placeholder="Descripción del ítem..."/>
+        <button class="btn btn-success btn-sm" id="btnConfirmAddItem">Agregar</button>
+        <button class="btn btn-ghost  btn-sm" id="btnCancelAddItem">Cancelar</button>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="btnCancelEditChecklist">Cancelar</button>
+      <span id="editChecklistCount" style="font-family:var(--mono);font-size:11px;color:var(--muted);align-self:center"></span>
+      <button class="btn btn-primary" id="btnSaveChecklist">Guardar checklist</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Resultado
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalResult">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="resultTitle">Resultado</h2>
+      <button class="btn-close" id="btnCloseResult">✕</button>
+    </div>
+    <div id="resultBody" style="padding:0 24px 8px;max-height:400px;overflow-y:auto"></div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" id="btnCloseResult2">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Inventario de activos
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalInventario">
+  <div class="modal modal-inventario">
+    <div class="modal-header">
+      <h2>Inventario de Activos</h2>
+      <button class="btn-close" id="btnCloseInventario">✕</button>
+    </div>
+
+    <div class="inventario-layout">
+      <section class="inventario-panel">
+        <div class="inventario-toolbar">
+          <input type="text" id="invSearch" placeholder="Buscar por nombre, serial o ID..."/>
+          <button class="btn btn-ghost btn-sm" id="btnInvRefresh">↻ Actualizar</button>
+        </div>
+        <div id="invResumen" class="inv-resumen">Sin datos.</div>
+        <div id="invList" class="inv-list"></div>
+      </section>
+
+      <section class="inventario-panel">
+        <p class="section-label">Registrar movimiento</p>
+        <div class="field-group">
+          <label>Activo seleccionado</label>
+          <input type="text" id="invAssetInfo" readonly placeholder="Selecciona un activo en la lista"/>
+        </div>
+        <div class="field-group">
+          <label>Tipo</label>
+          <select id="invTipo">
+            <option value="asignacion">Asignación</option>
+            <option value="reasignacion">Reasignación</option>
+            <option value="baja">Baja</option>
+            <option value="desactivacion">Desactivación (Inactivo)</option>
+            <option value="reactivacion">Reactivación</option>
+            <option value="observacion">Observación</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>Usuario anterior</label>
+          <select id="invUsuarioAnterior">
+            <option value="">— Selecciona usuario —</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>Usuario nuevo</label>
+          <select id="invUsuarioNuevo">
+            <option value="">— Selecciona usuario —</option>
+          </select>
+        </div>
+        <div class="field-group">
+          <label>Estado nuevo</label>
+          <input type="text" id="invEstadoNuevo" placeholder="Ej: En uso, En bodega, Baja"/>
+        </div>
+        <div class="field-group">
+          <label>Motivo / Observación</label>
+          <input type="text" id="invMotivo" placeholder="Detalle breve del cambio"/>
+        </div>
+        <div class="field-group">
+          <label>Responsable</label>
+          <input type="text" id="invResponsable" placeholder="Quien ejecuta el cambio"/>
+        </div>
+        <div class="field-group">
+          <label>ID Ticket (opcional)</label>
+          <input type="text" id="invTicketId" placeholder="Ej: 12345"/>
+        </div>
+        <div class="modal-footer inv-footer">
+          <button class="btn btn-success" id="btnInvGuardar">Guardar movimiento</button>
+        </div>
+        <p class="section-label" style="margin-top:6px">Historial del activo</p>
+        <div id="invHistory" class="inv-history"></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

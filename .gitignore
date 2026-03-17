@@ -1,0 +1,21 @@
+# Credenciales y configuración sensible
+config.json
+
+# Entorno virtual Python
+.venv/
+venv/
+env/
+
+# Caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+*.log
+
+# Archivos de datos locales
+inventory_history.json
+GLPI_-_Aviso_1ro_del_Mes.json
+mant.log
