@@ -10,9 +10,9 @@ from fastapi.responses import Response
 from core.glpi_errors import glpi_http_error
 from core.http_client import requests_lib as _requests
 from core.jsonutil import load_json, save_json
+from core.service_container import resolve_glpi
 from core.state_meta import record_last_glpi_sync
 from schemas import InventoryMovimientoIn
-from services.glpi import GLPIClient
 from settings import INVENTORY_PATH, get_merged_config
 
 router = APIRouter(prefix="/api/inventario", tags=["inventory"])
@@ -86,7 +86,7 @@ def _list_inventario_activos(modo_prueba: bool) -> list[dict]:
         if _requests is None:
             raise HTTPException(500, "Instala requests: pip install requests")
 
-        g = GLPIClient(cfg)
+        g = resolve_glpi(cfg)
         try:
             g.login()
             type_map = g.computer_type_id_to_name_map()
@@ -183,7 +183,7 @@ def get_inventario_usuarios(modo_prueba: bool = True):
     if _requests is None:
         raise HTTPException(500, "Instala requests: pip install requests")
 
-    g = GLPIClient(cfg)
+    g = resolve_glpi(cfg)
     try:
         g.login()
         raw = g._get_all(
@@ -314,7 +314,7 @@ def post_inventario_movimiento(data: InventoryMovimientoIn):
         elif not estado_objetivo and data.tipo == "reactivacion":
             estado_objetivo = "Activo"
 
-        g = GLPIClient(cfg)
+        g = resolve_glpi(cfg)
         try:
             g.login()
             glpi_sync["attempted"] = True

@@ -14,6 +14,7 @@ except ImportError:
 
 from core.glpi_errors import glpi_http_error
 from core.http_client import requests_lib as _requests
+from core.service_container import resolve_glpi
 from core.state_meta import record_last_glpi_sync
 from schemas import RenovacionConfirmarIn, RenovacionExcelCustomIn
 from services.glpi import GLPIClient
@@ -273,7 +274,7 @@ def get_renovacion_diagnostico():
     if _requests is None:
         raise HTTPException(500, "Instala requests: pip install requests")
 
-    g = GLPIClient(cfg)
+    g = resolve_glpi(cfg)
     extra = {}
     raw = []
     try:
@@ -320,7 +321,7 @@ def get_renovacion(modo_prueba: bool = True):
     if _requests is None:
         raise HTTPException(500, "Instala requests: pip install requests")
 
-    g = GLPIClient(cfg)
+    g = resolve_glpi(cfg)
     try:
         g.login()
         raw = g.get_computers_full()
@@ -602,7 +603,7 @@ def post_renovacion_confirmar(payload: RenovacionConfirmarIn):
     if _requests is None:
         raise HTTPException(500, "Instala requests: pip install requests")
 
-    g = GLPIClient(cfg)
+    g = resolve_glpi(cfg)
     aplicados = []
     errores: list[str] = []
     fecha_iso = date.today().isoformat()

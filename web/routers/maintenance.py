@@ -17,12 +17,11 @@ from core.dates import asignar_fechas_habiles, fmt_fecha_larga, mes_anterior_key
 from core.glpi_errors import glpi_http_error
 from core.http_client import requests_lib as _requests
 from core.jsonutil import load_json, save_json
+from core.service_container import resolve_glpi, resolve_outlook
 from core.state_meta import get_last_glpi_sync_at, merge_meta_into_state, record_last_glpi_sync
 from schemas import CompletarIn, ConfirmarIn
 from services.email_templates import build_email_html
-from services.glpi import GLPIClient
 from services.mantenimiento_report import build_mantenimiento_mes_excel
-from services.outlook import OutlookClient
 from settings import CONFIG_PATH, STATE_PATH, get_merged_config
 
 log = logging.getLogger("mant")
@@ -176,7 +175,7 @@ def cargar_equipos(modo_prueba: bool = True):
     if _requests is None:
         raise HTTPException(500, "Instala requests: pip install requests")
 
-    g = GLPIClient(cfg)
+    g = resolve_glpi(cfg)
     try:
         log.info("Iniciando sesión en GLPI")
         try:
@@ -250,8 +249,8 @@ def confirmar(data: ConfirmarIn):
         if _requests is None:
             raise HTTPException(500, "Instala requests")
 
-        glpi = GLPIClient(cfg)
-        outlook = OutlookClient(cfg)
+        glpi = resolve_glpi(cfg)
+        outlook = resolve_outlook(cfg)
         log.info("Conectando GLPI + Outlook para confirmar")
         glpi.login()
         outlook.authenticate()
@@ -399,7 +398,7 @@ def completar_mantenimiento(data: CompletarIn):
     if _requests is None:
         raise HTTPException(500, "Instala requests")
 
-    g = GLPIClient(cfg)
+    g = resolve_glpi(cfg)
     try:
         g.login()
         g.close_ticket(int(data.ticket_id), resolucion)
@@ -503,7 +502,7 @@ def reporte_mantenimiento_excel(
         if _requests is None:
             raise HTTPException(500, "Instala requests")
 
-        glpi = GLPIClient(cfg)
+        glpi = resolve_glpi(cfg)
         reportados: list = []
         realizados: list = []
         try:
@@ -542,7 +541,7 @@ def test_outlook():
         return {"ok": False, "step": "config", "error": f"Faltan campos: {', '.join(faltantes)}"}
 
     try:
-        outlook = OutlookClient(cfg)
+        outlook = resolve_outlook(cfg)
         outlook.authenticate()
     except Exception as ex:
         return {"ok": False, "step": "auth", "error": f"Error obteniendo token Azure: {ex}"}
@@ -637,7 +636,7 @@ def test_outlook_event():
 
     event_id = None
     try:
-        outlook = OutlookClient(cfg)
+        outlook = resolve_outlook(cfg)
         outlook.authenticate()
         now = datetime.now()
         start_dt = now + timedelta(minutes=5)
