@@ -4,7 +4,7 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Mantenimientos Preventivos — Sicolsa</title>
-  <link rel="stylesheet" href="/static/css/app.css"/>
+  <link rel="stylesheet" href="/static/css/app.css?v=renov-manual-1"/>
 </head>
 <body>
 
@@ -15,6 +15,7 @@
     <span class="topbar-title">Mantenimientos Preventivos</span>
   </div>
   <div class="topbar-right">
+    <span id="lastGlpiSync" class="topbar-sync muted" style="font-size:11px;margin-right:12px;max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Última sincronización con GLPI"></span>
     <label class="toggle-wrap" id="togglePruebaWrap" title="Activar/desactivar modo prueba">
       <input type="checkbox" id="chkPrueba"/>
       <span class="toggle-track">
@@ -23,6 +24,7 @@
       <span class="toggle-label" id="togglePruebaLabel">REAL</span>
     </label>
     <button class="btn btn-ghost" id="btnInventario">📦 Inventario</button>
+    <button class="btn btn-ghost" id="btnRenovacion">🔄 Renovación</button>
     <button class="btn btn-ghost" id="btnConfig">⚙ Config</button>
   </div>
 </header>
@@ -54,6 +56,11 @@
     <div class="toolbar">
       <button class="btn btn-primary" id="btnCargar">▶ Cargar equipos desde GLPI</button>
       <button class="btn btn-success" id="btnConfirmar" disabled>✓ Crear tickets y eventos en Outlook</button>
+      <label class="reporte-mes-wrap" title="Mes del informe (mantenimientos reportados y realizados)">
+        <span class="reporte-mes-lbl">Excel</span>
+        <input type="month" id="inpReporteMes" class="inp-reporte-mes"/>
+      </label>
+      <button type="button" class="btn btn-ghost" id="btnReporteExcel" title="Descargar informe mensual en Excel">⬇ Excel mes</button>
       <span class="status-inline" id="statusInline"></span>
     </div>
 
@@ -74,9 +81,9 @@
         <span class="cuota-stat-lbl">CON TICKET</span>
       </div>
       <div class="cuota-stat-sep">·</div>
-      <div class="cuota-stat" id="cstatPendientes">
+      <div class="cuota-stat" id="cstatPendientes" title="Equipos con casilla marcada; debe coincidir con CUOTA MES menos CON TICKET (pendientes por crear)">
         <span class="cuota-stat-num">—</span>
-        <span class="cuota-stat-lbl">PENDIENTES</span>
+        <span class="cuota-stat-lbl">MARCADOS</span>
       </div>
     </div>
 
@@ -314,6 +321,8 @@
         <div class="inventario-toolbar">
           <input type="text" id="invSearch" placeholder="Buscar por nombre, serial o ID..."/>
           <button class="btn btn-ghost btn-sm" id="btnInvRefresh">↻ Actualizar</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnInvCsvActivos" title="Descargar inventario de equipos en CSV">⬇ Equipos CSV</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnInvCsv" title="Descargar historial de movimientos en CSV">⬇ Historial CSV</button>
         </div>
         <div id="invResumen" class="inv-resumen">Sin datos.</div>
         <div id="invList" class="inv-list"></div>
@@ -374,6 +383,71 @@
   </div>
 </div>
 
-<script src="/static/js/app.js"></script>
+<!-- ══════════════════════════════════════════════════════════════
+     MODAL: Renovación de equipos
+════════════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop hidden" id="modalRenovacion">
+  <div class="modal modal-renovacion">
+    <div class="modal-header">
+      <h2>🔄 Análisis de Renovación de Equipos</h2>
+      <button class="btn-close" id="btnCloseRenovacion">✕</button>
+    </div>
+
+    <!-- Resumen stats -->
+    <div class="ren-stats hidden" id="renStats">
+      <div class="ren-stat" id="renStatActivos">
+        <span class="ren-stat-num">—</span>
+        <span class="ren-stat-lbl">ACTIVOS</span>
+      </div>
+      <div class="ren-stat-sep">·</div>
+      <div class="ren-stat" id="renStatDebiles">
+        <span class="ren-stat-num">—</span>
+        <span class="ren-stat-lbl">SPECS DÉBILES</span>
+      </div>
+      <div class="ren-stat-sep">·</div>
+      <div class="ren-stat" id="renStatInactivos">
+        <span class="ren-stat-num">—</span>
+        <span class="ren-stat-lbl">INACTIVOS</span>
+      </div>
+      <div class="ren-stat-sep">·</div>
+      <div class="ren-stat" id="renStatCandidatos">
+        <span class="ren-stat-num">—</span>
+        <span class="ren-stat-lbl">INACTIVOS DISP.</span>
+      </div>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="ren-toolbar">
+      <button class="btn btn-primary" id="btnRenAnalizar">▶ Analizar equipos</button>
+      <button class="btn btn-success hidden" id="btnRenExcel">⬇ Descargar Excel</button>
+      <button class="btn btn-warning hidden" id="btnRenAplicar" title="Trasladar usuario al reemplazo y marcar el equipo débil como inactivo">✓ Aplicar en GLPI</button>
+      <input type="text" id="renResponsable" class="ren-responsable-input hidden" placeholder="Responsable (opc.)" autocomplete="name"/>
+      <span class="muted ren-aplicar-meta hidden" id="renAplicarHint"></span>
+      <button type="button" class="btn btn-ghost btn-sm hidden" id="btnRenAplicarMarcar">Marcar todos</button>
+      <button type="button" class="btn btn-ghost btn-sm hidden" id="btnRenAplicarNinguno">Ninguno</button>
+      <button class="btn btn-ghost btn-sm hidden" id="btnRenReset">↺ Restablecer descartes</button>
+      <button class="btn btn-ghost btn-sm" id="btnRenDiag" title="Ver campos RAW de GLPI para diagnosticar">🔍 Diagnóstico GLPI</button>
+      <span class="status-inline" id="renStatus"></span>
+    </div>
+
+    <!-- Panel de diagnóstico (oculto por defecto) -->
+    <div class="hidden" id="renDiagPanel" style="margin:0 20px 12px;background:var(--surf3);border:1px solid var(--border);border-radius:var(--radius);padding:14px;font-family:var(--mono);font-size:11px;overflow-x:auto;max-height:320px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <span style="color:var(--accent)">Campos RAW devueltos por GLPI (primeros 3 equipos)</span>
+        <button class="btn-close" id="btnRenDiagClose">✕</button>
+      </div>
+      <pre id="renDiagContent" style="color:var(--text);white-space:pre-wrap;word-break:break-all"></pre>
+    </div>
+
+    <!-- Tabla de pares -->
+    <div class="ren-table-wrap" id="renTableWrap">
+      <p class="muted" style="padding:24px 0;text-align:center">
+        Presiona "Analizar equipos" para ver los resultados.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/app.js?v=renov-manual-1"></script>
 </body>
 </html>

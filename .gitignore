@@ -1,5 +1,6 @@
 # Credenciales y configuración sensible
 config.json
+.env
 
 # Entorno virtual Python
 .venv/
@@ -16,6 +17,7 @@ __pycache__/
 *.log
 
 # Archivos de datos locales
+state.json
 inventory_history.json
 GLPI_-_Aviso_1ro_del_Mes.json
 mant.log

@@ -5,11 +5,51 @@ const state = {
   modoP: false,
   equipos: [],       // candidatos actuales con fechas asignadas
   cargado: false,
+  cuota: 0,
+  /** Cuántos equipos marcar para confirmar: cuota − tickets ya creados este mes (null si cuota=0). */
+  cuotaMarcar: null,
+  reserva: [],       // equipos elegibles no incluidos en la cuota inicial (mismo criterio GLPI)
   inventario: [],
   inventarioFiltrado: [],
   inventarioSel: null,
   inventarioUsuarios: [],
 };
+
+// ── Fechas hábiles (alineado con core/dates.py) ─────────────────
+function fmtLocalYMD(d) {
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mo}-${da}`;
+}
+
+function diasHabilesJs(y, m) {
+  const out = [];
+  const last = new Date(y, m, 0).getDate();
+  for (let d = 1; d <= last; d++) {
+    const dt = new Date(y, m - 1, d);
+    const wd = dt.getDay();
+    if (wd >= 1 && wd <= 5) out.push(dt);
+  }
+  return out;
+}
+
+function asignarFechasHabilesJs(equipos) {
+  const hoy = new Date();
+  const y = hoy.getFullYear();
+  const m = hoy.getMonth() + 1;
+  let dias = diasHabilesJs(y, m);
+  const hoyStr = fmtLocalYMD(hoy);
+  dias = dias.filter(d => fmtLocalYMD(d) >= hoyStr);
+  if (dias.length === 0) dias = diasHabilesJs(y, m);
+  const total = equipos.length;
+  if (total === 0) return [];
+  const intervalo = Math.max(1, Math.floor(dias.length / total));
+  return equipos.map((eq, i) => {
+    const idx = Math.min(i * intervalo + Math.floor(intervalo / 2), dias.length - 1);
+    return { ...eq, fecha_limite: fmtLocalYMD(dias[idx]) };
+  });
+}
 
 // ── Utilidades DOM ────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
@@ -22,6 +62,34 @@ const setStatus = (msg, cls = "") => {
 };
 const show = id => $(id).classList.remove("hidden");
 const hide = id => $(id).classList.add("hidden");
+
+function fmtSyncLabel(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+  } catch (_) {
+    return "";
+  }
+}
+
+function updateLastGlpiSync(iso) {
+  const el = $("lastGlpiSync");
+  if (!el) return;
+  const t = fmtSyncLabel(iso);
+  el.textContent = t ? `GLPI ${t}` : "";
+  el.title = iso ? `Última sincronización GLPI:\n${iso}` : "Sin lectura GLPI registrada aún (modo real)";
+}
+
+async function refreshEstadoSync() {
+  try {
+    const r = await fetch("/api/estado");
+    if (!r.ok) return;
+    const d = await r.json();
+    updateLastGlpiSync(d.last_glpi_sync_at);
+  } catch (_) {}
+}
 
 // Parsea JSON de una respuesta sin explotar si el body no es JSON
 async function safeJson(res) {
@@ -51,6 +119,31 @@ function syncModoPrueba() {
 }
 chkPrueba.addEventListener("change", syncModoPrueba);
 syncModoPrueba();
+
+function initReporteMesDefault() {
+  const el = $("inpReporteMes");
+  if (!el || el.value) return;
+  const d = new Date();
+  el.value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+initReporteMesDefault();
+
+$("btnReporteExcel").addEventListener("click", () => {
+  const el = $("inpReporteMes");
+  const v = el && el.value;
+  if (!v || !/^\d{4}-\d{2}$/.test(v)) {
+    alert("Elige un mes válido para el informe Excel.");
+    return;
+  }
+  const [ya, mo] = v.split("-").map(Number);
+  if (mo < 1 || mo > 12) {
+    alert("Mes no válido.");
+    return;
+  }
+  const url = `/api/reporte/mantenimiento-excel?anio=${ya}&mes=${mo}&modo_prueba=${state.modoP}`;
+  window.location.href = url;
+});
 
 // ── Cargar equipos ────────────────────────────────────────────────
 $("btnCargar").addEventListener("click", async () => {
@@ -82,6 +175,7 @@ function renderDashboard(data) {
   state.cargado = true;
   renderMesAnterior(data.tickets_ant);
   renderMesActual(data);
+  if (data.last_glpi_sync_at) updateLastGlpiSync(data.last_glpi_sync_at);
   // Badge "ya hecho"
   if (data.mes_actual_done) {
     $("badgeDone").textContent = "✓ Tickets del mes ya creados";
@@ -154,6 +248,73 @@ function renderMesAnterior(ant) {
   }
 }
 
+// ── Mantenimiento: reserva / cuota UI ─────────────────────────────
+function mantIdsEnLista() {
+  return new Set(state.equipos.map(r => String(r.getData().id)));
+}
+
+function refreshMantAddSelect(sel) {
+  if (!sel) return;
+  const enLista = mantIdsEnLista();
+  const keep = sel.value;
+  sel.innerHTML = `<option value="">— Añadir otro equipo (reserva) —</option>`;
+  for (const eq of state.reserva || []) {
+    if (enLista.has(String(eq.id))) continue;
+    const o = document.createElement("option");
+    o.value = String(eq.id);
+    o.textContent = `${eq.nombre} · últ. mant. ${eq.ultima_fecha || "—"}`;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+
+function renumberEquipoRows() {
+  state.equipos.forEach((r, j) => {
+    const tag = r.el.querySelector(".equipo-idx");
+    if (tag) tag.textContent = `EQUIPO ${String(j + 1).padStart(2, "0")}`;
+  });
+}
+
+function cuotaRequeridaMarcar() {
+  const cuota = state.cuota || 0;
+  if (cuota <= 0) return null;
+  if (state.modoP) return cuota;
+  return state.cuotaMarcar != null ? state.cuotaMarcar : cuota;
+}
+
+function updateMarcadosCuotaStat() {
+  const cuota = state.cuota || 0;
+  const n = state.equipos.filter(r => r.getData().incluido).length;
+  const numPend = $("cstatPendientes")?.querySelector(".cuota-stat-num");
+  if (!numPend) return;
+  numPend.textContent = String(n);
+  if (cuota <= 0) {
+    numPend.style.color = "var(--muted)";
+    return;
+  }
+  const req = cuotaRequeridaMarcar();
+  numPend.style.color = n === req ? "var(--success)" : "var(--warning)";
+}
+
+function updatePendientesUi() {
+  updateMarcadosCuotaStat();
+  const sec = $("mantSecPendTitle");
+  if (sec) {
+    const lista = state.equipos.length;
+    const n = state.equipos.filter(r => r.getData().incluido).length;
+    const c = state.cuota;
+    const req = cuotaRequeridaMarcar();
+    if (c > 0 && req != null) {
+      const yaCon = c - req;
+      sec.textContent =
+        `PENDIENTES DE CREAR (${lista} en lista · ${n}/${req} marcados para completar cuota · ${yaCon} ya con ticket)`;
+    } else {
+      sec.textContent = `PENDIENTES DE CREAR (${lista} en lista)`;
+    }
+  }
+  refreshMantAddSelect($("mantAddSelect"));
+}
+
 // ── Panel mes actual ──────────────────────────────────────────────
 function renderMesActual(data) {
   // Label
@@ -169,14 +330,17 @@ function renderMesActual(data) {
   $("cstatTotal").querySelector(".cuota-stat-num").textContent    = data.total;
   $("cstatCuota").querySelector(".cuota-stat-num").textContent    = data.cuota;
   $("cstatTickets").querySelector(".cuota-stat-num").textContent  = data.ya_tienen || 0;
-  $("cstatPendientes").querySelector(".cuota-stat-num").textContent = data.candidatos.length;
-  // Color dinámico de pendientes
-  const numPend = $("cstatPendientes").querySelector(".cuota-stat-num");
-  numPend.style.color = data.candidatos.length > 0 ? "var(--warning)" : "var(--success)";
 
   const list = $("equiposList");
   list.innerHTML = "";
   state.equipos = [];
+  state.cuota = data.cuota;
+  state.reserva = data.reserva || [];
+  {
+    const c = data.cuota || 0;
+    const conT = (data.tickets_mes || []).length;
+    state.cuotaMarcar = c > 0 ? Math.max(0, c - conT) : null;
+  }
 
   // ── Ya creados este mes
   if (data.tickets_mes.length > 0) {
@@ -234,27 +398,64 @@ function renderMesActual(data) {
       : "No hay equipos pendientes de mantenimiento este mes.";
     list.appendChild(msg);
     $("btnConfirmar").disabled = true;
+    $("btnConfirmar").title = "";
     return;
   }
 
   const secPend = document.createElement("p");
   secPend.className = "sec-title";
-  secPend.textContent = `PENDIENTES DE CREAR (${data.candidatos.length})`;
+  secPend.id = "mantSecPendTitle";
   list.appendChild(secPend);
+
+  const pendOuter = document.createElement("div");
+  pendOuter.className = "mant-pend-outer";
+
+  if (state.reserva.length > 0) {
+    const bar = document.createElement("div");
+    bar.className = "mant-add-bar";
+    const lab = document.createElement("span");
+    lab.className = "mant-add-lbl";
+    lab.textContent = "Añadir equipo desde la reserva (misma elegibilidad que la cuota):";
+    const sel = document.createElement("select");
+    sel.id = "mantAddSelect";
+    sel.className = "mant-add-select";
+    const btnA = document.createElement("button");
+    btnA.type = "button";
+    btnA.className = "btn btn-primary btn-sm";
+    btnA.id = "mantAddBtn";
+    btnA.textContent = "Añadir a la lista";
+    btnA.addEventListener("click", () => onMantAddEquipo());
+    bar.appendChild(lab);
+    bar.appendChild(sel);
+    bar.appendChild(btnA);
+    pendOuter.appendChild(bar);
+  }
+
+  const pendWrap = document.createElement("div");
+  pendWrap.id = "mantPendRows";
+  pendOuter.appendChild(pendWrap);
+  list.appendChild(pendOuter);
 
   for (let i = 0; i < data.candidatos.length; i++) {
     const eq  = data.candidatos[i];
-    const row = buildEquipoRow(i, eq);
-    list.appendChild(row.el);
+    const row = buildEquipoRow(i, eq, updatePendientesUi);
+    pendWrap.appendChild(row.el);
     state.equipos.push(row);
   }
 
-  $("btnConfirmar").disabled = false;
+  refreshMantAddSelect($("mantAddSelect"));
+  updatePendientesUi();
+
+  const sinPendienteCuota = state.cuota > 0 && state.cuotaMarcar === 0;
+  $("btnConfirmar").disabled = sinPendienteCuota;
+  $("btnConfirmar").title = sinPendienteCuota
+    ? "La cuota del mes ya está cubierta por los tickets actuales."
+    : "";
   $("btnConfirmar").className = "btn btn-success";
 }
 
 // ── Equipo row editable ───────────────────────────────────────────
-function buildEquipoRow(idx, eq) {
+function buildEquipoRow(idx, eq, onUiUpdate) {
   const el = document.createElement("div");
   el.className = "equipo-row";
   el.dataset.idx = idx;
@@ -263,13 +464,19 @@ function buildEquipoRow(idx, eq) {
   if (sinHistorial) el.classList.add("sin-historial");
 
   el.innerHTML = `
-    <input type="checkbox" checked title="Incluir"/>
+    <div class="equipo-row-actions">
+      <input type="checkbox" checked title="Incluir en la creación (debe coincidir con los equipos faltantes de la cuota)"/>
+      <button type="button" class="btn btn-ghost btn-sm equipo-quitar">Quitar</button>
+    </div>
     <div class="equipo-info">
       <span class="equipo-idx">EQUIPO ${String(idx+1).padStart(2,"0")}</span>
       <div class="equipo-nombre">
         ${esc(eq.nombre)}
         ${sinHistorial ? `<span class="badge-sin-registro" title="Sin mantenimiento registrado en GLPI">SIN REGISTRO</span>` : ""}
       </div>
+      ${(eq.usuario_asignado || "").trim()
+        ? `<div class="equipo-usuario-asignado" title="Usuario asignado al equipo en GLPI">👤 ${esc((eq.usuario_asignado || "").trim())}</div>`
+        : `<div class="equipo-usuario-asignado sin-usuario">Sin usuario asignado en GLPI</div>`}
       ${!sinHistorial && eq.ultima_fecha
         ? `<div class="equipo-ultima">Último mant.: ${eq.ultima_fecha}</div>`
         : sinHistorial ? `<div class="equipo-ultima" style="color:var(--warning)">Sin mantenimiento previo registrado</div>` : ""}
@@ -295,6 +502,7 @@ function buildEquipoRow(idx, eq) {
   const chk  = el.querySelector("input[type=checkbox]");
   chk.addEventListener("change", () => {
     el.classList.toggle("excluido", !chk.checked);
+    if (onUiUpdate) onUiUpdate();
   });
 
   // Validación visual de fecha
@@ -303,7 +511,7 @@ function buildEquipoRow(idx, eq) {
     inpFecha.style.borderColor = inpFecha.value ? "" : "var(--danger)";
   });
 
-  return {
+  const ctl = {
     el,
     getData() {
       return {
@@ -316,11 +524,62 @@ function buildEquipoRow(idx, eq) {
       };
     },
   };
+
+  el.querySelector(".equipo-quitar").addEventListener("click", () => {
+    const i = state.equipos.indexOf(ctl);
+    if (i >= 0) state.equipos.splice(i, 1);
+    el.remove();
+    renumberEquipoRows();
+    refreshMantAddSelect($("mantAddSelect"));
+    updatePendientesUi();
+  });
+
+  return ctl;
+}
+
+function onMantAddEquipo() {
+  const sel = $("mantAddSelect");
+  if (!sel || !sel.value) {
+    alert("Elige un equipo en el desplegable.");
+    return;
+  }
+  const id = sel.value;
+  const eq = state.reserva.find(e => String(e.id) === id);
+  if (!eq) return;
+  const copy = { ...eq };
+  const withFecha = asignarFechasHabilesJs([copy])[0];
+  const pendWrap = $("mantPendRows");
+  if (!pendWrap) return;
+  const rowCtl = buildEquipoRow(state.equipos.length, withFecha, updatePendientesUi);
+  state.equipos.push(rowCtl);
+  pendWrap.appendChild(rowCtl.el);
+  sel.value = "";
+  refreshMantAddSelect(sel);
+  renumberEquipoRows();
+  updatePendientesUi();
 }
 
 // ── Confirmar ─────────────────────────────────────────────────────
 $("btnConfirmar").addEventListener("click", () => {
   if (!state.cargado) return;
+
+  const cuota = state.cuota || 0;
+  const nIncl = state.equipos.filter(r => r.getData().incluido).length;
+  const req = cuotaRequeridaMarcar();
+  if (cuota > 0 && req != null) {
+    if (req === 0) {
+      alert("La cuota del mes ya está cubierta. No hace falta confirmar más equipos.");
+      return;
+    }
+    if (nIncl !== req) {
+      const conT = cuota - req;
+      alert(
+        `Para completar la cuota de ${cuota} equipo(s) debes marcar exactamente ${req} (ya hay ${conT} con ticket este mes).\n` +
+        `Ahora hay ${nIncl} marcado(s). Ajusta la lista o las casillas.`
+      );
+      return;
+    }
+  }
 
   // Validar fechas
   const invalidas = state.equipos
@@ -346,6 +605,7 @@ async function ejecutarConfirmar() {
 
   const payload = {
     modo_prueba: state.modoP,
+    cuota_mes: state.cuota || 0,
     equipos: state.equipos.map(r => r.getData()),
   };
 
@@ -648,6 +908,12 @@ $("btnCloseConfig").addEventListener("click",  () => hide("modalConfig"));
 $("btnCancelConfig").addEventListener("click", () => hide("modalConfig"));
 
 // ── Inventario de activos ────────────────────────────────────────
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => { refreshEstadoSync(); });
+} else {
+  refreshEstadoSync();
+}
+
 $("btnInventario").addEventListener("click", async () => {
   await cargarInventario();
   show("modalInventario");
@@ -655,6 +921,16 @@ $("btnInventario").addEventListener("click", async () => {
 
 $("btnCloseInventario").addEventListener("click", () => hide("modalInventario"));
 $("btnInvRefresh").addEventListener("click", async () => { await cargarInventario(); });
+$("btnInvCsvActivos").addEventListener("click", () => {
+  window.location.href = `/api/inventario/activos.csv?modo_prueba=${state.modoP}`;
+});
+$("btnInvCsv").addEventListener("click", () => {
+  let url = `/api/inventario/historial.csv`;
+  if (state.inventarioSel?.asset_id) {
+    url += `?asset_id=${encodeURIComponent(state.inventarioSel.asset_id)}`;
+  }
+  window.location.href = url;
+});
 $("invSearch").addEventListener("input", () => aplicarFiltroInventario());
 $("btnInvGuardar").addEventListener("click", async () => { await guardarMovimientoInventario(); });
 $("invTipo").addEventListener("change", () => syncEstadoNuevoConTipo(false));
@@ -705,6 +981,7 @@ async function cargarInventario() {
     state.inventarioSel = null;
     limpiarFormInventario();
     aplicarFiltroInventario();
+    await refreshEstadoSync();
   } catch (e) {
     list.innerHTML = `<p class="muted" style="color:var(--danger)">Error: ${esc(e.message)}</p>`;
     resumen.textContent = "Error al cargar.";
@@ -754,7 +1031,9 @@ function renderInventarioLista() {
   const list = $("invList");
   const total = state.inventario.length;
   const bajas = state.inventario.filter(a => a.baja).length;
-  $("invResumen").textContent = `Total: ${total} · Bajas: ${bajas} · Activos: ${total - bajas}`;
+  const syncEl = $("lastGlpiSync");
+  const syncShort = (syncEl && syncEl.textContent) ? ` · ${syncEl.textContent}` : "";
+  $("invResumen").textContent = `Total: ${total} · Bajas: ${bajas} · Activos: ${total - bajas}${syncShort}`;
 
   list.innerHTML = "";
   if (!state.inventarioFiltrado.length) {
@@ -873,6 +1152,647 @@ function limpiarFormInventario(resetSeleccion = true) {
   $("invHistory").innerHTML = `<p class="muted">Selecciona un activo para ver su historial.</p>`;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// RENOVACIÓN DE EQUIPOS
+// ══════════════════════════════════════════════════════════════════
+const renState = {
+  raw: null,
+  excludedActivos: new Set(),
+  excludedCandidatos: new Set(),
+  manualReplacementByActivo: {}, // { activoId: inactivoId }
+  /** IDs de activos incluidos a mano en la lista de “débiles” (Set de string) */
+  manualDebilesIds: new Set(),
+  computed: null,
+  /** { [activoId]: true|false }; undefined = aplicar (marcado por defecto) */
+  aplicarEnGlpi: {},
+};
+
+$("btnRenovacion").addEventListener("click", () => {
+  show("modalRenovacion");
+});
+$("btnCloseRenovacion").addEventListener("click", () => hide("modalRenovacion"));
+$("modalRenovacion").addEventListener("click", e => {
+  if (e.target === $("modalRenovacion")) hide("modalRenovacion");
+});
+
+$("btnRenAnalizar").addEventListener("click", async () => {
+  const btn = $("btnRenAnalizar");
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span>Analizando...`;
+  $("renStatus").textContent = "";
+  hide("btnRenExcel");
+  hide("btnRenAplicar");
+  hide("renResponsable");
+  hide("renAplicarHint");
+  hide("btnRenAplicarMarcar");
+  hide("btnRenAplicarNinguno");
+
+  try {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 45000);
+    const res = await fetch(`/api/renovacion?modo_prueba=${state.modoP}`, { signal: ctl.signal });
+    clearTimeout(to);
+    if (!res.ok) {
+      const err = await safeJson(res);
+      throw new Error(err?.detail || `Error HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    renState.raw = data;
+    renState.excludedActivos.clear();
+    renState.excludedCandidatos.clear();
+    renState.manualReplacementByActivo = {};
+    renState.manualDebilesIds.clear();
+    renState.aplicarEnGlpi = {};
+    recomputeRenovacion();
+    renderRenovacion();
+    show("btnRenReset");
+  } catch (e) {
+    const msg = e.name === "AbortError"
+      ? "Tiempo de análisis agotado (45s). Reintenta o reduce carga."
+      : e.message;
+    $("renStatus").textContent = `✗ ${msg}`;
+    $("renStatus").style.color = "var(--danger)";
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = "▶ Analizar equipos";
+  }
+});
+
+$("btnRenExcel").addEventListener("click", async () => {
+  const data = renState.computed;
+  if (!data) return;
+
+  const btn = $("btnRenExcel");
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = "Generando...";
+  try {
+    const res = await fetch("/api/renovacion/excel-custom", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const err = await safeJson(res);
+      throw new Error(err?.detail || `Error HTTP ${res.status}`);
+    }
+
+    const blob = await res.blob();
+    const cd = res.headers.get("content-disposition") || "";
+    const m = /filename=([^;]+)/i.exec(cd);
+    const filename = (m?.[1] || `renovacion_personalizada_${new Date().toISOString().slice(0,10)}.xlsx`).replace(/"/g, "");
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("No se pudo generar el Excel:\n" + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+});
+
+function renSyncAplicarChoices() {
+  const data = renState.computed;
+  if (!data?.pares) return;
+  const keep = new Set(
+    data.pares.filter(p => p.reemplazo).map(p => String(p.activo.id))
+  );
+  for (const k of Object.keys(renState.aplicarEnGlpi)) {
+    if (!keep.has(k)) delete renState.aplicarEnGlpi[k];
+  }
+}
+
+function renSelectedParesForGlpi() {
+  const data = renState.computed;
+  if (!data?.pares) return [];
+  return data.pares.filter(
+    p => p.reemplazo && renState.aplicarEnGlpi[String(p.activo.id)] !== false
+  );
+}
+
+function renUpdateAplicarHint() {
+  const el = $("renAplicarHint");
+  if (!el) return;
+  const data = renState.computed;
+  const total = (data?.pares || []).filter(p => p.reemplazo).length;
+  const n = renSelectedParesForGlpi().length;
+  if (total > 0) {
+    el.textContent = `${n} de ${total} para aplicar en GLPI`;
+    show("renAplicarHint");
+  } else {
+    hide("renAplicarHint");
+  }
+}
+
+function renPayloadConfirmar() {
+  const data = renState.computed;
+  if (!data?.pares) return null;
+  const pares = renSelectedParesForGlpi();
+  if (!pares.length) return null;
+  return {
+    modo_prueba: state.modoP,
+    responsable: ($("renResponsable")?.value || "").trim(),
+    estado_reemplazo: "Activo",
+    estado_debil: "Inactivo",
+    pares,
+  };
+}
+
+function renSetAllAplicarMarcado(val) {
+  const data = renState.computed;
+  if (!data?.pares) return;
+  for (const p of data.pares) {
+    if (p.reemplazo) renState.aplicarEnGlpi[String(p.activo.id)] = val;
+  }
+  renUpdateAplicarHint();
+  renderRenovacion();
+}
+
+$("btnRenAplicarMarcar")?.addEventListener("click", () => renSetAllAplicarMarcado(true));
+$("btnRenAplicarNinguno")?.addEventListener("click", () => renSetAllAplicarMarcado(false));
+
+$("btnRenAplicar").addEventListener("click", () => {
+  const payload = renPayloadConfirmar();
+  if (!payload) {
+    alert("Marca al menos un reemplazo con «Aplicar este reemplazo en GLPI» o pulsa «Marcar todos».");
+    return;
+  }
+  const n = payload.pares.length;
+  const modoTxt = state.modoP
+    ? "Modo prueba: no se escribirá nada en GLPI (solo simulación)."
+    : "Se modificará GLPI: en cada par se asignará el usuario del equipo débil al de reemplazo (estado Activo) y el equipo débil quedará sin usuario y en estado Inactivo.";
+  openConfirm(
+    state.modoP ? "Simular renovación en GLPI" : "Aplicar renovación en GLPI",
+    `${modoTxt}\n\n¿Continuar con ${n} reemplazo(s)?`,
+    async () => {
+      const btn = $("btnRenAplicar");
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = "Aplicando...";
+      $("renStatus").textContent = "";
+      try {
+        const res = await fetch("/api/renovacion/confirmar", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const body = await safeJson(res);
+        if (!res.ok) {
+          throw new Error(body?.detail || `Error HTTP ${res.status}`);
+        }
+        const ok = body.ok;
+        const aplicados = body.aplicados || [];
+        const errores = body.errores || [];
+        let msg = ok
+          ? `✓ ${aplicados.length} renovación(es) ${state.modoP ? "simulada(s)" : "aplicada(s)"}.`
+          : `Hecho con incidencias: ${aplicados.length} ok, ${errores.length} error(es).`;
+        if (errores.length) msg += "\n\n" + errores.join("\n");
+        $("renStatus").textContent = msg.split("\n")[0];
+        $("renStatus").style.color = ok ? "var(--success)" : "var(--warning)";
+        alert(msg);
+      } catch (e) {
+        $("renStatus").textContent = `✗ ${e.message}`;
+        $("renStatus").style.color = "var(--danger)";
+        alert("Error al aplicar renovación:\n" + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+      }
+    }
+  );
+});
+
+$("btnRenReset").addEventListener("click", () => {
+  renState.excludedActivos.clear();
+  renState.excludedCandidatos.clear();
+  renState.manualReplacementByActivo = {};
+  renState.aplicarEnGlpi = {};
+  recomputeRenovacion();
+  renderRenovacion();
+});
+
+$("btnRenDiag").addEventListener("click", async () => {
+  const btn = $("btnRenDiag");
+  const panel = $("renDiagPanel");
+  const pre   = $("renDiagContent");
+  btn.disabled = true;
+  btn.textContent = "Cargando...";
+  hide("renDiagPanel");
+  try {
+    const res = await fetch("/api/renovacion/diagnostico");
+    if (!res.ok) {
+      const err = await safeJson(res);
+      throw new Error(err?.detail || `Error HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    pre.textContent = JSON.stringify(data, null, 2);
+    show("renDiagPanel");
+  } catch (e) {
+    pre.textContent = `Error: ${e.message}`;
+    show("renDiagPanel");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🔍 Diagnóstico GLPI";
+  }
+});
+$("btnRenDiagClose").addEventListener("click", () => hide("renDiagPanel"));
+
+/** Misma lógica que el backend (`renovation._estado_cat`) para filtrar activos. */
+function renEstadoCat(estado) {
+  const s = String(estado ?? "").trim().toLowerCase();
+  if (s === "1") return "activo";
+  if (s === "2") return "inactivo";
+  if (s.includes("inactivo") || s.includes("stock") || s.includes("reserva") || s.includes("almacen") || s.includes("almacén")) return "inactivo";
+  if (s.includes("activo") || s.includes("en uso") || s.includes("produccion") || s.includes("producción")) return "activo";
+  if (s.includes("baja") || s.includes("retir") || s.includes("obsole")) return "baja";
+  return "otro";
+}
+
+function recomputeRenovacion() {
+  const data = renState.raw;
+  if (!data) {
+    renState.computed = null;
+    return;
+  }
+
+  const rawDebiles = (data.debiles_items || [])
+    .filter(d => !renState.excludedActivos.has(String(d.id)));
+  const baseIds = new Set(rawDebiles.map(d => String(d.id)));
+  for (const sid of [...renState.manualDebilesIds]) {
+    if (baseIds.has(sid)) renState.manualDebilesIds.delete(sid);
+  }
+
+  const todos = data.todos || [];
+  const manualExtras = [];
+  for (const sid of [...renState.manualDebilesIds]) {
+    const eq = todos.find(t => String(t.id) === sid);
+    if (!eq || renEstadoCat(eq.estado) !== "activo") {
+      renState.manualDebilesIds.delete(sid);
+      continue;
+    }
+    if (renState.excludedActivos.has(sid)) continue;
+    manualExtras.push(eq);
+  }
+
+  const debiles = [...rawDebiles, ...manualExtras].sort((a, b) => (a.score || 0) - (b.score || 0));
+  const inactivos = (data.inactivos_items || [])
+    .filter(c => !renState.excludedCandidatos.has(String(c.id)))
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  // Limpiar selecciones manuales inválidas por descartes/ausencia
+  for (const [aid, iid] of Object.entries(renState.manualReplacementByActivo)) {
+    const okActivo = debiles.some(d => String(d.id) === String(aid));
+    const okInactivo = inactivos.some(i => String(i.id) === String(iid));
+    if (!okActivo || !okInactivo) delete renState.manualReplacementByActivo[aid];
+  }
+
+  const manualUsed = new Set(Object.values(renState.manualReplacementByActivo).map(String));
+  const pares = [];
+  const usadosAuto = new Set();
+  for (const d of debiles) {
+    const manualId = renState.manualReplacementByActivo[String(d.id)];
+    const manual = inactivos.find(c => String(c.id) === String(manualId)) || null;
+    const mejorAuto = inactivos.find(c =>
+      !manualUsed.has(String(c.id)) &&
+      !usadosAuto.has(String(c.id)) &&
+      (c.score || 0) > (d.score || 0)
+    ) || null;
+    const mejor = manual || mejorAuto;
+    pares.push({
+      activo: d,
+      reemplazo: mejor,
+      mejora_ram: mejor ? Math.floor(((mejor.ram_mb || 0) - (d.ram_mb || 0)) / 1024) : 0,
+      mejora_disco: mejor ? ((mejor.disco_gb || 0) - (d.disco_gb || 0)) : 0,
+      mejora_ssd: mejor ? ((mejor.tipo_disco || "").toUpperCase().includes("SSD") && !(d.tipo_disco || "").toUpperCase().includes("SSD")) : false,
+      ganancia_score: mejor ? ((mejor.score || 0) - (d.score || 0)) : 0,
+    });
+    if (!manual && mejorAuto) usadosAuto.add(String(mejorAuto.id));
+  }
+
+  renState.computed = {
+    total_activos: data.total_activos || 0,
+    total_inactivos: data.total_inactivos || 0,
+    debiles_base: data.debiles || 0,
+    candidatos_base: data.candidatos || 0,
+    debiles: debiles.length,
+    candidatos: inactivos.length,
+    inactivos_disponibles: inactivos,
+    pares,
+    todos: data.todos || [],
+  };
+}
+
+function buildManualAddBar(data) {
+  const bar = document.createElement("div");
+  bar.className = "ren-manual-add";
+
+  const hint = document.createElement("p");
+  hint.className = "ren-manual-add-hint";
+  hint.textContent = "¿Falta algún activo? Añádelo aquí para buscarle reemplazo como al resto de equipos débiles.";
+  bar.appendChild(hint);
+
+  const row = document.createElement("div");
+  row.className = "ren-manual-add-row";
+
+  const sel = document.createElement("select");
+  sel.className = "ren-select ren-manual-add-select";
+
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = "— Seleccionar equipo activo —";
+  sel.appendChild(empty);
+
+  const shownIds = new Set((data.pares || []).map(p => String(p.activo.id)));
+  const todos = renState.raw?.todos || [];
+  const candidates = todos
+    .filter(t => renEstadoCat(t.estado) === "activo" && !shownIds.has(String(t.id)))
+    .sort((a, b) => String(a.nombre || "").localeCompare(String(b.nombre || ""), "es", { sensitivity: "base" }));
+
+  for (const t of candidates) {
+    const o = document.createElement("option");
+    o.value = String(t.id);
+    const sc = t.score ?? 0;
+    o.textContent = `${t.nombre || "(sin nombre)"} · Score ${sc}`;
+    sel.appendChild(o);
+  }
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "btn btn-primary btn-sm";
+  btn.textContent = "Añadir a la lista";
+  btn.addEventListener("click", () => {
+    const v = sel.value;
+    if (!v) return;
+    renState.manualDebilesIds.add(v);
+    recomputeRenovacion();
+    renderRenovacion();
+  });
+
+  row.appendChild(sel);
+  row.appendChild(btn);
+  bar.appendChild(row);
+  return bar;
+}
+
+function renderRenovacion() {
+  const data = renState.computed;
+  if (!data) return;
+
+  renSyncAplicarChoices();
+
+  // Stats
+  const s = $("renStats");
+  s.classList.remove("hidden");
+  $("renStatActivos").querySelector(".ren-stat-num").textContent    = data.total_activos;
+  $("renStatDebiles").querySelector(".ren-stat-num").textContent    = data.debiles;
+  $("renStatInactivos").querySelector(".ren-stat-num").textContent  = data.total_inactivos;
+  $("renStatCandidatos").querySelector(".ren-stat-num").textContent = data.candidatos;
+
+  const wrap = $("renTableWrap");
+  wrap.innerHTML = "";
+
+  wrap.appendChild(buildManualAddBar(data));
+
+  const exclInfo = document.createElement("p");
+  exclInfo.className = "muted";
+  exclInfo.style.marginBottom = "10px";
+  exclInfo.textContent = `Descartes aplicados: ${renState.excludedActivos.size} activos · ${renState.excludedCandidatos.size} inactivos`;
+  wrap.appendChild(exclInfo);
+
+  if (!data.pares || data.pares.length === 0) {
+    const msg = document.createElement("p");
+    msg.className = "muted";
+    msg.style.cssText = "text-align:center;padding:24px 0 8px";
+    msg.textContent = "No hay equipos en la lista de débiles (automáticos descartados o ninguno detectado). Puedes añadir activos arriba.";
+    wrap.appendChild(msg);
+    show("btnRenExcel");
+    hide("btnRenAplicar");
+    hide("renResponsable");
+    hide("renAplicarHint");
+    hide("btnRenAplicarMarcar");
+    hide("btnRenAplicarNinguno");
+    renUpdateAplicarHint();
+    $("renStatus").textContent = `✓ ${data.debiles} en lista débil · 0 reemplazos en pantalla${state.modoP ? " [PRUEBA]" : ""}`;
+    $("renStatus").style.color = "var(--success)";
+    return;
+  }
+
+  const conReemplazo   = data.pares.filter(p => p.reemplazo);
+  const sinReemplazo   = data.pares.filter(p => !p.reemplazo);
+
+  if (conReemplazo.length) {
+    show("btnRenAplicar");
+    show("renResponsable");
+    show("btnRenAplicarMarcar");
+    show("btnRenAplicarNinguno");
+  } else {
+    hide("btnRenAplicar");
+    hide("renResponsable");
+    hide("btnRenAplicarMarcar");
+    hide("btnRenAplicarNinguno");
+    hide("renAplicarHint");
+  }
+
+  if (conReemplazo.length) {
+    const t1 = document.createElement("div");
+    t1.className = "ren-section-title";
+    t1.textContent = `REEMPLAZOS RECOMENDADOS (${conReemplazo.length})`;
+    wrap.appendChild(t1);
+    for (const p of conReemplazo) wrap.appendChild(buildPairCard(p));
+  }
+
+  if (sinReemplazo.length) {
+    const t2 = document.createElement("div");
+    t2.className = "ren-section-title";
+    t2.style.color = "var(--warning)";
+    t2.textContent = `SIN REEMPLAZO DISPONIBLE (${sinReemplazo.length})`;
+    wrap.appendChild(t2);
+    for (const p of sinReemplazo) wrap.appendChild(buildPairCard(p));
+  }
+
+  show("btnRenExcel");
+  renUpdateAplicarHint();
+  $("renStatus").textContent = `✓ ${data.debiles} equipos débiles (de ${data.debiles_base}) · ${conReemplazo.length} reemplazos disponibles${state.modoP ? " [PRUEBA]" : ""}`;
+  $("renStatus").style.color = "var(--success)";
+}
+
+function buildExcludeToggle(label, checked, onChange) {
+  const wrap = document.createElement("label");
+  wrap.className = "ren-exclude";
+  const chk = document.createElement("input");
+  chk.type = "checkbox";
+  chk.checked = checked;
+  chk.addEventListener("change", onChange);
+  const txt = document.createElement("span");
+  txt.textContent = label;
+  wrap.appendChild(chk);
+  wrap.appendChild(txt);
+  return wrap;
+}
+
+function buildPairCard(p) {
+  const d = p.activo;
+  const r = p.reemplazo;
+  const card = document.createElement("div");
+  card.className = `ren-pair-card${r ? "" : " sin-candidato"}`;
+
+  const mejoras = [];
+  if (p.mejora_ram > 0)   mejoras.push(`+${p.mejora_ram} GB RAM`);
+  if (p.mejora_disco > 0) mejoras.push(`+${p.mejora_disco} GB disco`);
+  if (p.mejora_ssd)       mejoras.push("HDD → SSD");
+
+  card.innerHTML = `
+    <div class="ren-side ren-side-debil">
+      <div class="ren-side-nombre">${esc(d.nombre)}</div>
+      <div class="ren-side-meta">
+        ${d.usuario ? `Usuario: ${esc(d.usuario)}<br>` : ""}
+        ${d.serial   ? `Serial: ${esc(d.serial)}<br>` : ""}
+        ${d.fabricante ? `${esc(d.fabricante)} ${esc(d.modelo || "")}` : ""}
+      </div>
+      <div class="ren-side-meta" style="margin-top:4px">${esc(d.specs_fmt)}</div>
+      <span class="ren-score-pill ren-score-debil">Score: ${d.score}/100</span>
+    </div>
+    <div class="ren-side-arrow">→</div>
+    <div class="ren-side ren-side-candid">
+      ${r ? `
+        <div class="ren-side-nombre">${esc(r.nombre)}</div>
+        <div class="ren-side-meta">
+          ${r.serial ? `Serial: ${esc(r.serial)}<br>` : ""}
+          ${r.fabricante ? `${esc(r.fabricante)} ${esc(r.modelo || "")}` : ""}
+        </div>
+        <div class="ren-side-meta" style="margin-top:4px">${esc(r.specs_fmt)}</div>
+        <span class="ren-score-pill ren-score-candid">Score: ${r.score}/100</span>
+        ${mejoras.length ? `<div class="ren-mejoras">▲ ${esc(mejoras.join(" · "))}</div>` : ""}
+      ` : `
+        <div class="ren-side-nombre" style="color:var(--muted)">Sin candidato disponible</div>
+        <div class="ren-side-meta">No hay equipos inactivos con mejores especificaciones.</div>
+      `}
+    </div>`;
+
+  const left = card.querySelector(".ren-side-debil");
+  const nombreEl = left.querySelector(".ren-side-nombre");
+
+  if (r) {
+    const aid = String(d.id);
+    const applyLbl = document.createElement("label");
+    applyLbl.className = "ren-apply-in-card";
+    const applyChk = document.createElement("input");
+    applyChk.type = "checkbox";
+    applyChk.checked = renState.aplicarEnGlpi[aid] !== false;
+    applyChk.addEventListener("change", () => {
+      renState.aplicarEnGlpi[aid] = applyChk.checked;
+      renUpdateAplicarHint();
+    });
+    const applyTxt = document.createElement("span");
+    applyTxt.textContent = "Aplicar este reemplazo en GLPI";
+    applyLbl.appendChild(applyChk);
+    applyLbl.appendChild(applyTxt);
+    left.insertBefore(applyLbl, left.firstChild);
+  }
+
+  if (renState.manualDebilesIds.has(String(d.id))) {
+    const badge = document.createElement("span");
+    badge.className = "ren-manual-badge";
+    badge.textContent = "Manual";
+    nombreEl.appendChild(document.createTextNode(" "));
+    nombreEl.appendChild(badge);
+  }
+
+  left.appendChild(
+    buildExcludeToggle(
+      "Descartar este equipo activo",
+      renState.excludedActivos.has(String(d.id)),
+      () => {
+        if (renState.excludedActivos.has(String(d.id))) renState.excludedActivos.delete(String(d.id));
+        else renState.excludedActivos.add(String(d.id));
+        recomputeRenovacion();
+        renderRenovacion();
+      }
+    )
+  );
+
+  if (renState.manualDebilesIds.has(String(d.id))) {
+    const btnQuitar = document.createElement("button");
+    btnQuitar.type = "button";
+    btnQuitar.className = "btn btn-ghost btn-sm ren-manual-quitar";
+    btnQuitar.textContent = "Quitar de la lista manual";
+    btnQuitar.addEventListener("click", () => {
+      renState.manualDebilesIds.delete(String(d.id));
+      recomputeRenovacion();
+      renderRenovacion();
+    });
+    left.appendChild(btnQuitar);
+  }
+
+  const right = card.querySelector(".ren-side-candid");
+  if (r) {
+    right.appendChild(
+      buildExcludeToggle(
+        "No usar este equipo inactivo",
+        renState.excludedCandidatos.has(String(r.id)),
+        () => {
+          if (renState.excludedCandidatos.has(String(r.id))) renState.excludedCandidatos.delete(String(r.id));
+          else renState.excludedCandidatos.add(String(r.id));
+          recomputeRenovacion();
+          renderRenovacion();
+        }
+      )
+    );
+  }
+
+  // Selector manual: mostrar TODOS los inactivos disponibles.
+  const pickerWrap = document.createElement("div");
+  pickerWrap.className = "ren-side-meta";
+  pickerWrap.style.marginTop = "8px";
+
+  const selectId = `renSel_${String(d.id)}`;
+  const label = document.createElement("label");
+  label.setAttribute("for", selectId);
+  label.textContent = "Elegir inactivo manualmente:";
+  label.style.display = "block";
+  label.style.marginBottom = "4px";
+  label.style.color = "var(--accent)";
+  pickerWrap.appendChild(label);
+
+  const sel = document.createElement("select");
+  sel.id = selectId;
+  sel.className = "ren-select";
+
+  const optAuto = document.createElement("option");
+  optAuto.value = "";
+  optAuto.textContent = "Automático (mejor candidato)";
+  sel.appendChild(optAuto);
+
+  const inactivos = renState.computed?.inactivos_disponibles || [];
+  for (const i of inactivos) {
+    const o = document.createElement("option");
+    o.value = String(i.id);
+    const better = (i.score || 0) > (d.score || 0) ? "↑" : "·";
+    o.textContent = `${better} ${i.nombre} (Score ${i.score || 0})`;
+    sel.appendChild(o);
+  }
+
+  const manual = renState.manualReplacementByActivo[String(d.id)] || "";
+  sel.value = manual;
+  sel.addEventListener("change", () => {
+    const v = sel.value;
+    if (!v) delete renState.manualReplacementByActivo[String(d.id)];
+    else renState.manualReplacementByActivo[String(d.id)] = v;
+    recomputeRenovacion();
+    renderRenovacion();
+  });
+  pickerWrap.appendChild(sel);
+  right.appendChild(pickerWrap);
+
+  return card;
+}
+
 // ── Tabs config ───────────────────────────────────────────────────
 document.querySelectorAll(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -903,7 +1823,7 @@ $("btnCloseResult").addEventListener("click",  () => hide("modalResult"));
 $("btnCloseResult2").addEventListener("click", () => hide("modalResult"));
 
 // ── Cerrar modales clicando backdrop ─────────────────────────────
-["modalConfig","modalConfirmar","modalResult","modalInventario"].forEach(id => {
+["modalConfig","modalConfirmar","modalResult","modalInventario","modalRenovacion"].forEach(id => {
   $(id).addEventListener("click", e => {
     if (e.target === $(id)) hide(id);
   });
@@ -912,7 +1832,7 @@ $("btnCloseResult2").addEventListener("click", () => hide("modalResult"));
 // ── Escape cierra modales ─────────────────────────────────────────
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
-    ["modalConfig","modalConfirmar","modalResult","modalInventario"].forEach(hide);
+    ["modalConfig","modalConfirmar","modalResult","modalInventario","modalRenovacion"].forEach(hide);
   }
 });
 
