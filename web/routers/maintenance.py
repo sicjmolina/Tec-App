@@ -5,6 +5,8 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter
 from fastapi import HTTPException
+from adapters.json_repositories import JsonMaintenanceStateRepository
+from application.maintenance_use_cases import MaintenanceUseCases
 
 try:
     from msal import ConfidentialClientApplication
@@ -27,6 +29,7 @@ from settings import CONFIG_PATH, STATE_PATH, get_merged_config
 log = logging.getLogger("mant")
 
 router = APIRouter(prefix="/api", tags=["maintenance"])
+maintenance_uc = MaintenanceUseCases(JsonMaintenanceStateRepository())
 
 
 def _procesar_tickets_ant(glpi_list: list, state_list: list) -> dict:
@@ -166,291 +169,22 @@ def _datos_prueba():
 
 @router.get("/cargar")
 def cargar_equipos(modo_prueba: bool = True):
-    if modo_prueba:
-        return _datos_prueba()
-
-    cfg = get_merged_config()
-    if not cfg.get("glpi_url"):
-        raise HTTPException(400, "Configura la URL de GLPI primero.")
-    if _requests is None:
-        raise HTTPException(500, "Instala requests: pip install requests")
-
-    g = resolve_glpi(cfg)
-    try:
-        log.info("Iniciando sesión en GLPI")
-        try:
-            g.login()
-        except Exception as ex:
-            glpi_http_error(ex, "iniciar sesión en GLPI")
-
-        computers = g.get_computers()
-        if not computers:
-            raise HTTPException(502, "GLPI no devolvió equipos. Verifica el App-Token y User-Token.")
-
-        log.info(f"Computadores obtenidos: {len(computers)}")
-        candidatos, total, cuota, ya_tienen, tickets_mes, reserva = g.select_candidates(computers)
-        candidatos = asignar_fechas_habiles(candidatos)
-
-        tickets_ant = []
-        try:
-            tickets_ant = g.get_tickets_mes_anterior()
-        except Exception as ex:
-            log.warning(f"No se pudo obtener mes anterior: {ex}")
-
-        state = load_json(STATE_PATH, {})
-        key_ant = mes_anterior_key()
-        state_ant = state.get(key_ant, {}).get("equipos", [])
-    finally:
-        g.logout()
-
-    record_last_glpi_sync()
-
-    return {
-        "total": total,
-        "cuota": cuota,
-        "ya_tienen": ya_tienen,
-        "candidatos": candidatos,
-        "reserva": reserva,
-        "tickets_mes": tickets_mes,
-        "tickets_ant": _procesar_tickets_ant(tickets_ant, state_ant),
-        "mes_actual_done": _mes_actual_done(),
-        "last_glpi_sync_at": get_last_glpi_sync_at(),
-    }
+    return maintenance_uc.cargar_equipos(modo_prueba, resolve_glpi)
 
 
 @router.post("/confirmar")
 def confirmar(data: ConfirmarIn):
-    incluidos = [e for e in data.equipos if e.incluido]
-    cfg = get_merged_config()
-    creados = []
-    errores = []
-
-    if data.modo_prueba:
-        if data.cuota_mes > 0 and len(incluidos) != data.cuota_mes:
-            raise HTTPException(
-                400,
-                f"[Prueba] Debes incluir exactamente {data.cuota_mes} equipo(s). "
-                f"Ahora hay {len(incluidos)} marcado(s).",
-            )
-        if data.cuota_mes <= 0 and not incluidos:
-            raise HTTPException(400, "Selecciona al menos un equipo.")
-        for i, eq in enumerate(incluidos):
-            time.sleep(0.1)
-            d = date.fromisoformat(eq.fecha_limite)
-            creados.append({
-                "nombre": eq.nombre,
-                "fecha": fmt_fecha_larga(d),
-                "ticket_id": 90000 + i,
-                "evento_id": f"fake-event-{i}",
-                "correo_ok": False,
-            })
-        log.info(f"[PRUEBA] {len(creados)} tickets simulados")
-    else:
-        if _requests is None:
-            raise HTTPException(500, "Instala requests")
-
-        glpi = resolve_glpi(cfg)
-        outlook = resolve_outlook(cfg)
-        log.info("Conectando GLPI + Outlook para confirmar")
-        glpi.login()
-        outlook.authenticate()
-
-        try:
-            if data.cuota_mes > 0:
-                _, tickets_mes_actuales = glpi.get_tickets_abiertos_mes()
-                con_ticket = len(tickets_mes_actuales)
-                requeridos = max(0, data.cuota_mes - con_ticket)
-                if requeridos == 0:
-                    if incluidos:
-                        raise HTTPException(
-                            400,
-                            "La cuota del mes ya está cubierta por los tickets abiertos este mes. "
-                            "Quita las marcas o recarga la lista desde GLPI.",
-                        )
-                    raise HTTPException(
-                        400,
-                        "La cuota del mes ya está cubierta. No hay equipos pendientes por confirmar.",
-                    )
-                if len(incluidos) != requeridos:
-                    raise HTTPException(
-                        400,
-                        f"Debes incluir exactamente {requeridos} equipo(s) para completar la cuota de "
-                        f"{data.cuota_mes} (ya hay {con_ticket} ticket(s) este mes). "
-                        f"Ahora hay {len(incluidos)} marcado(s). Ajusta las casillas o la lista.",
-                    )
-            elif not incluidos:
-                raise HTTPException(400, "Selecciona al menos un equipo.")
-
-            for eq in incluidos:
-                try:
-                    d = date.fromisoformat(eq.fecha_limite)
-                    h, mn = eq.hora_inicio.split(":")
-                    h_fin = str((int(h) + 1) % 24).zfill(2)
-                    inicio_iso = f"{eq.fecha_limite}T{h.zfill(2)}:{mn}:00"
-                    fin_iso = f"{eq.fecha_limite}T{h_fin}:{mn}:00"
-                    fecha_larga = fmt_fecha_larga(d)
-
-                    if not glpi.ticket_exists(eq.nombre):
-                        ticket_id = glpi.create_ticket(eq.nombre, eq.fecha_limite)
-                        glpi.link_computer(ticket_id, eq.id)
-                    else:
-                        ticket_id = None
-
-                    dest_eq = (
-                        [e.strip() for e in eq.destinatarios.split(",") if e.strip()]
-                        if eq.destinatarios
-                        else []
-                    )
-                    todos_destinatarios = list(set(outlook.notify_emails + dest_eq))
-
-                    evento_id = outlook.create_event(
-                        f"Mantenimiento Preventivo: {eq.nombre}",
-                        inicio_iso,
-                        fin_iso,
-                        attendees=todos_destinatarios,
-                    )
-
-                    correo_ok = False
-                    if todos_destinatarios:
-                        try:
-                            html = build_email_html(
-                                nombre=eq.nombre,
-                                fecha_larga=fecha_larga,
-                                hora_inicio=eq.hora_inicio,
-                                ticket_id=ticket_id,
-                                glpi_url=cfg.get("glpi_url", "").replace("/apirest.php", ""),
-                            )
-                            outlook.send_email(
-                                destinatarios=todos_destinatarios,
-                                subject=f"🖥️ Mantenimiento Preventivo programado: {eq.nombre}",
-                                body_html=html,
-                            )
-                            correo_ok = True
-                        except Exception as ex_mail:
-                            log.warning(f"Correo no enviado para {eq.nombre}: {ex_mail}")
-
-                    creados.append({
-                        "nombre": eq.nombre,
-                        "fecha": fecha_larga,
-                        "ticket_id": ticket_id,
-                        "evento_id": evento_id,
-                        "correo_ok": correo_ok,
-                    })
-                    log.info(f"OK {eq.nombre} — ticket {ticket_id} | correo: {correo_ok}")
-
-                except Exception as ex:
-                    msg = f"{eq.nombre}: {ex}"
-                    errores.append(msg)
-                    log.error(msg)
-        finally:
-            glpi.logout()
-
-    state = load_json(STATE_PATH, {})
-    key = mes_key()
-    state[key] = {
-        "completado": len(errores) == 0,
-        "equipos": creados,
-        "fecha_ejecucion": datetime.now().isoformat(),
-        "modo_prueba": data.modo_prueba,
-    }
-    merge_meta_into_state(state)
-    save_json(STATE_PATH, state)
-
-    return {"creados": creados, "errores": errores, "ok": len(errores) == 0}
+    return maintenance_uc.confirmar(data, resolve_glpi, resolve_outlook)
 
 
 @router.post("/completar")
 def completar_mantenimiento(data: CompletarIn):
-    hoy = date.today().isoformat()
-    checklist = load_checklist()
-    total_ok = len(data.items_ok)
-    total_ch = len(checklist)
-
-    lineas = [
-        f"Mantenimiento preventivo completado el {hoy}.",
-        f"Items verificados: {total_ok}/{total_ch}",
-        "",
-    ]
-    cat_actual = None
-    for item in checklist:
-        if item["categoria"] != cat_actual:
-            cat_actual = item["categoria"]
-            lineas.append(f"[{cat_actual}]")
-        marca = "✓" if item["id"] in data.items_ok else "✗"
-        lineas.append(f"  {marca} {item['texto']}")
-
-    if data.notas.strip():
-        lineas += ["", "Notas del técnico:", data.notas.strip()]
-
-    resolucion = "\n".join(lineas)
-    fecha_ok = False
-
-    if data.modo_prueba:
-        log.info(f"[PRUEBA] Completar mantenimiento '{data.nombre}' ticket #{data.ticket_id}")
-        return {
-            "ok": True,
-            "ticket_cerrado": True,
-            "fecha_actualizada": hoy,
-            "modo_prueba": True,
-        }
-
-    cfg = get_merged_config()
-    if _requests is None:
-        raise HTTPException(500, "Instala requests")
-
-    g = resolve_glpi(cfg)
-    try:
-        g.login()
-        g.close_ticket(int(data.ticket_id), resolucion)
-        log.info(f"Ticket #{data.ticket_id} cerrado — {data.nombre}")
-
-        cid = data.computer_id
-        if not cid:
-            cid = g.find_computer_by_name(data.nombre)
-
-        if cid:
-            try:
-                g.update_computer_fecha(cid, hoy)
-                log.info(f"Fecha de mant. actualizada en Computer #{cid} → {hoy}")
-                fecha_ok = True
-            except Exception as ex:
-                log.warning(f"No se pudo actualizar fecha del equipo: {ex}")
-    finally:
-        g.logout()
-
-    state = load_json(STATE_PATH, {})
-    key = mes_key()
-    equipos = state.get(key, {}).get("equipos", [])
-    for eq in equipos:
-        if eq.get("nombre") == data.nombre:
-            eq["completado"] = True
-            eq["fecha_completado"] = hoy
-            break
-    if key in state:
-        state[key]["equipos"] = equipos
-        merge_meta_into_state(state)
-        save_json(STATE_PATH, state)
-
-    return {
-        "ok": True,
-        "ticket_cerrado": True,
-        "fecha_actualizada": hoy if fecha_ok else None,
-        "modo_prueba": False,
-    }
+    return maintenance_uc.completar(data, resolve_glpi)
 
 
 @router.get("/estado")
 def get_estado():
-    state = load_json(STATE_PATH, {})
-    key = mes_key()
-    hoy = date.today()
-    return {
-        "mes_key": key,
-        "mes_label": f"{MESES_ES[hoy.month]} {hoy.year}",
-        "completado": bool(state.get(key, {}).get("completado")),
-        "equipos": state.get(key, {}).get("equipos", []),
-        "last_glpi_sync_at": get_last_glpi_sync_at(),
-    }
+    return maintenance_uc.get_estado()
 
 
 @router.get("/reporte/mantenimiento-excel")
@@ -514,8 +248,8 @@ def reporte_mantenimiento_excel(
             glpi.logout()
         for r in realizados:
             r.setdefault("nota", "")
-        comp_state = _completados_desde_state(y, m)
-        _merge_realizados_con_state(realizados, comp_state)
+        comp_state = maintenance_uc.completados_desde_state(y, m)
+        maintenance_uc.merge_realizados_con_state(realizados, comp_state)
 
     for r in reportados:
         r.setdefault("nota", "")
