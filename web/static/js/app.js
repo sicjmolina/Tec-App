@@ -539,7 +539,17 @@ async function renderVistaHistoricaAsync() {
     const res = await fetch(`/api/tickets-mes-vista?anio=${y}&mes=${mo}&modo_prueba=${state.modoP}`);
     if (!res.ok) {
       const err = await safeJson(res);
-      throw new Error(err?.detail || `Error del servidor (${res.status})`);
+      let msg = err?.detail;
+      if (Array.isArray(msg)) msg = msg.map(e => (e && e.msg) || String(e)).join("; ");
+      if (res.status === 404) {
+        msg =
+          "El servidor no tiene la función «vista por mes» (ruta /api/tickets-mes-vista). " +
+          "Despliega el último código del repositorio Tec-App en el equipo donde corre la API y reinicia el servicio (FastAPI/uvicorn/IIS). " +
+          "El panel «MES ANTERIOR» sí puede verse porque usa otra llamada que ya existía.";
+      } else if (!msg) {
+        msg = `Error del servidor (${res.status})`;
+      }
+      throw new Error(typeof msg === "string" ? msg : String(msg));
     }
     const raw = await res.json();
     const tickets = raw.tickets_mes || [];
@@ -556,7 +566,9 @@ async function renderVistaHistoricaAsync() {
       const empty = document.createElement("p");
       empty.className = "muted";
       empty.style.cssText = "text-align:center;padding:16px";
-      empty.textContent = "No hay tickets de mantenimiento preventivo abiertos en ese mes en GLPI.";
+      empty.textContent =
+        "GLPI no devolvió tickets de mantenimiento preventivo con fecha de apertura en ese mes " +
+        "(puede deberse a criterios de categoría o a que los tickets se abrieron en otro mes).";
       list.appendChild(empty);
     } else {
       const mm = mo;
