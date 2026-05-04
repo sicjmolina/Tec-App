@@ -105,3 +105,5 @@ class CompletarIn(BaseModel):
     items_ok: list[str]
     notas: str = ""
     modo_prueba: bool = True
+    # Clave de estado JSON (ej. "2026-04") para marcar completado en el mes correcto al cerrar tickets antiguos.
+    state_mes_key: Optional[str] = None

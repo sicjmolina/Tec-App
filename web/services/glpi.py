@@ -249,6 +249,35 @@ class GLPIClient:
         tickets.sort(key=lambda t: (t["status_id"] in [5, 6], t["nombre"]))
         return nombres, tickets
 
+    def get_tickets_vista_mes(self, year: int, month: int) -> list:
+        """Tickets de mantenimiento cuya fecha de apertura cae en year-month (cualquier estado)."""
+        reportados, _ = self.reporte_mantenimiento_mes(year, month)
+        out: list = []
+        for r in reportados:
+            tid = r.get("ticket_id")
+            try:
+                tid_i = int(tid)
+            except (TypeError, ValueError):
+                continue
+            try:
+                st = int(r.get("status") or 0)
+            except (TypeError, ValueError):
+                st = 0
+            fl = r.get("fecha_limite") or "—"
+            if isinstance(fl, str) and len(fl) >= 10:
+                fl = fl[:10]
+            out.append(
+                {
+                    "id": tid_i,
+                    "nombre": r.get("nombre") or "—",
+                    "status_id": st,
+                    "status_txt": r.get("estado_txt") or STATUS_MAP.get(st, "?"),
+                    "fecha_limite": fl or "—",
+                }
+            )
+        out.sort(key=lambda t: (t["status_id"] in [5, 6], str(t["nombre"]).lower()))
+        return out
+
     def list_tickets_mantenimiento_categoria(self) -> list:
         """Tickets de mantenimiento preventivo (misma categoría ITIL que el resto de la app)."""
         return self._get_all(

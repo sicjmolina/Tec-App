@@ -13,6 +13,10 @@ const state = {
   inventarioFiltrado: [],
   inventarioSel: null,
   inventarioUsuarios: [],
+  /** Última respuesta de /api/cargar (mes de trabajo actual del servidor). */
+  lastCargar: null,
+  /** Mes mostrado en panel derecho (YYYY-MM). */
+  vistaYM: null,
 };
 
 // ── Fechas hábiles (alineado con core/dates.py) ─────────────────
@@ -116,6 +120,7 @@ function syncModoPrueba() {
     label.style.color        = "var(--success)";
     modoBar.style.display    = "none";
   }
+  if (state.cargado) refreshRightPanel();
 }
 chkPrueba.addEventListener("change", syncModoPrueba);
 syncModoPrueba();
@@ -128,6 +133,66 @@ function initReporteMesDefault() {
 }
 
 initReporteMesDefault();
+
+const MESES_LARGOS = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
+
+function yMesNow() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function vistaYMValid() {
+  const v = state.vistaYM;
+  return Boolean(v && /^\d{4}-\d{2}$/.test(v));
+}
+
+function updateMesHeaderLabel() {
+  const label = $("labelMesActual");
+  if (!label) return;
+  if (!vistaYMValid()) state.vistaYM = yMesNow();
+  const [, M] = state.vistaYM.split("-").map(Number);
+  const Y = Number(state.vistaYM.slice(0, 4));
+  const isCur = state.vistaYM === yMesNow();
+  label.textContent = isCur
+    ? `MES ACTUAL — ${MESES_LARGOS[M].toUpperCase()} ${Y}`
+    : `MES — ${MESES_LARGOS[M].toUpperCase()} ${Y}`;
+}
+
+function refreshBadgeFromLastCargar() {
+  const badge = $("badgeDone");
+  if (!badge) return;
+  const d = state.lastCargar;
+  if (state.vistaYM !== yMesNow() || !d) {
+    badge.textContent = "";
+    return;
+  }
+  badge.textContent = d.mes_actual_done ? "✓ Tickets del mes ya creados" : "";
+}
+
+if ($("inpVistaMes") && $("btnMesVista")) {
+  if (!state.vistaYM) state.vistaYM = yMesNow();
+  $("inpVistaMes").value = state.vistaYM;
+  $("btnMesVista").addEventListener("click", () => {
+    const el = $("inpVistaMes");
+    if (el.showPicker) {
+      try {
+        el.showPicker();
+      } catch (_) {
+        el.focus();
+      }
+    } else {
+      el.focus();
+    }
+  });
+  $("inpVistaMes").addEventListener("change", () => {
+    const v = $("inpVistaMes").value;
+    if (!v || !/^\d{4}-\d{2}$/.test(v)) return;
+    state.vistaYM = v;
+    refreshRightPanel();
+  });
+  refreshRightPanel();
+}
 
 $("btnReporteExcel").addEventListener("click", () => {
   const el = $("inpReporteMes");
@@ -173,15 +238,12 @@ $("btnCargar").addEventListener("click", async () => {
 // ── Render principal ──────────────────────────────────────────────
 function renderDashboard(data) {
   state.cargado = true;
+  state.lastCargar = data;
+  state.vistaYM = yMesNow();
+  if ($("inpVistaMes")) $("inpVistaMes").value = state.vistaYM;
   renderMesAnterior(data.tickets_ant);
-  renderMesActual(data);
+  refreshRightPanel();
   if (data.last_glpi_sync_at) updateLastGlpiSync(data.last_glpi_sync_at);
-  // Badge "ya hecho"
-  if (data.mes_actual_done) {
-    $("badgeDone").textContent = "✓ Tickets del mes ya creados";
-  } else {
-    $("badgeDone").textContent = "";
-  }
 }
 
 // ── Panel mes anterior ────────────────────────────────────────────
@@ -315,16 +377,65 @@ function updatePendientesUi() {
   refreshMantAddSelect($("mantAddSelect"));
 }
 
-// ── Panel mes actual ──────────────────────────────────────────────
-function renderMesActual(data) {
-  // Label
-  const hoy   = new Date();
-  const meses = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio",
-                 "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
-  $("labelMesActual").textContent =
-    `MES ACTUAL — ${meses[hoy.getMonth()+1].toUpperCase()} ${hoy.getFullYear()}`;
+// ── Panel mes actual / vista por mes ─────────────────────────────
+function appendSeccionYaCreados(listEl, tickets_mes, secTitleText) {
+  if (!tickets_mes || tickets_mes.length === 0) return;
 
-  // ── Cuota stats visuales
+  const secTitle = document.createElement("p");
+  secTitle.className = "sec-title";
+  secTitle.textContent = secTitleText;
+  listEl.appendChild(secTitle);
+
+  const STATUS_COLOR = {1:"var(--muted)",2:"var(--accent)",3:"var(--warning)",
+    4:"var(--warning)",5:"var(--success)",6:"var(--success)"};
+
+  for (const t of tickets_mes) {
+    const color    = STATUS_COLOR[t.status_id] || "var(--muted)";
+    const hoy_d    = new Date().toISOString().slice(0,10);
+    const vencida  = t.fecha_limite && t.fecha_limite !== "—" && t.fecha_limite < hoy_d;
+    const limiteTxt = t.fecha_limite && t.fecha_limite !== "—"
+      ? `límite: ${t.fecha_limite}` : "";
+    const yaCerrado = [5, 6].includes(t.status_id);
+
+    const row = document.createElement("div");
+    row.className = `ticket-row${yaCerrado ? " done" : ""}${vencida && !yaCerrado ? " vencida-row" : ""}`;
+    row.dataset.ticketId = t.id;
+    row.dataset.nombre   = t.nombre;
+
+    const completarTxt = vencida && !yaCerrado ? "⚠ Completar (vencida)" : "✓ Completar";
+
+    row.innerHTML = `
+      <span class="ticket-dot" style="color:${color}">●</span>
+      <span class="ticket-nombre" title="${esc(t.nombre)}">${esc(t.nombre)}</span>
+      <span class="ticket-status" style="color:${color}">${esc(t.status_txt)}</span>
+      ${limiteTxt ? `<span class="ticket-limit ${vencida ? "vencida" : ""}">${esc(limiteTxt)}</span>` : ""}
+      ${yaCerrado
+        ? `<span class="ticket-done-badge">✓ Completado</span>`
+        : `<button class="btn-completar" data-id="${t.id}" data-nombre="${esc(t.nombre)}">${completarTxt}</button>`
+      }`;
+
+    if (!yaCerrado) {
+      row.querySelector(".btn-completar").addEventListener("click", () => {
+        abrirChecklist({
+          ticket_id: t.id,
+          nombre: t.nombre,
+          rowEl: row,
+          state_mes_key: state.vistaYM,
+        });
+      });
+    }
+
+    listEl.appendChild(row);
+  }
+
+  const sep = document.createElement("div");
+  sep.className = "sec-sep";
+  listEl.appendChild(sep);
+}
+
+function paintMesActualFromCargarData(data) {
+  updateMesHeaderLabel();
+
   const stats = $("cuotaStats");
   stats.classList.remove("hidden");
   $("cstatTotal").querySelector(".cuota-stat-num").textContent    = data.total;
@@ -342,58 +453,18 @@ function renderMesActual(data) {
     state.cuotaMarcar = c > 0 ? Math.max(0, c - conT) : null;
   }
 
-  // ── Ya creados este mes
-  if (data.tickets_mes.length > 0) {
-    const secTitle = document.createElement("p");
-    secTitle.className = "sec-title";
-    secTitle.textContent = `YA CREADOS ESTE MES (${data.tickets_mes.length})`;
-    list.appendChild(secTitle);
-
-    const STATUS_COLOR = {1:"var(--muted)",2:"var(--accent)",3:"var(--warning)",
-                          4:"var(--warning)",5:"var(--success)",6:"var(--success)"};
-
-    for (const t of data.tickets_mes) {
-      const color    = STATUS_COLOR[t.status_id] || "var(--muted)";
-      const hoy_d    = new Date().toISOString().slice(0,10);
-      const vencida  = t.fecha_limite && t.fecha_limite !== "—" && t.fecha_limite < hoy_d;
-      const limiteTxt = t.fecha_limite && t.fecha_limite !== "—"
-        ? `límite: ${t.fecha_limite}` : "";
-      const yaCerrado = [5, 6].includes(t.status_id);
-
-      const row = document.createElement("div");
-      row.className = `ticket-row${yaCerrado ? " done" : ""}${vencida && !yaCerrado ? " vencida-row" : ""}`;
-      row.dataset.ticketId = t.id;
-      row.dataset.nombre   = t.nombre;
-
-      const completarTxt = vencida && !yaCerrado ? "⚠ Completar (vencida)" : "✓ Completar";
-
-      row.innerHTML = `
-        <span class="ticket-dot" style="color:${color}">●</span>
-        <span class="ticket-nombre" title="${esc(t.nombre)}">${esc(t.nombre)}</span>
-        <span class="ticket-status" style="color:${color}">${esc(t.status_txt)}</span>
-        ${limiteTxt ? `<span class="ticket-limit ${vencida ? "vencida" : ""}">${esc(limiteTxt)}</span>` : ""}
-        ${yaCerrado
-          ? `<span class="ticket-done-badge">✓ Completado</span>`
-          : `<button class="btn-completar" data-id="${t.id}" data-nombre="${esc(t.nombre)}">${completarTxt}</button>`
-        }`;
-
-      if (!yaCerrado) {
-        row.querySelector(".btn-completar").addEventListener("click", () => {
-          abrirChecklist({ ticket_id: t.id, nombre: t.nombre, rowEl: row });
-        });
-      }
-
-      list.appendChild(row);
-    }
-
-    const sep = document.createElement("div"); sep.className = "sec-sep"; list.appendChild(sep);
+  if ((data.tickets_mes || []).length > 0) {
+    appendSeccionYaCreados(
+      list,
+      data.tickets_mes,
+      `YA CREADOS ESTE MES (${data.tickets_mes.length})`,
+    );
   }
 
-  // ── Candidatos pendientes
   if (data.candidatos.length === 0) {
     const msg = document.createElement("p");
     msg.style.cssText = "color:var(--muted);font-size:13px;padding:20px 0;text-align:center";
-    msg.textContent = data.tickets_mes.length > 0
+    msg.textContent = (data.tickets_mes || []).length > 0
       ? "TODOS LOS EQUIPOS YA TIENEN TICKET ESTE MES"
       : "No hay equipos pendientes de mantenimiento este mes.";
     list.appendChild(msg);
@@ -452,6 +523,84 @@ function renderMesActual(data) {
     ? "La cuota del mes ya está cubierta por los tickets actuales."
     : "";
   $("btnConfirmar").className = "btn btn-success";
+}
+
+async function renderVistaHistoricaAsync() {
+  $("cuotaStats")?.classList.add("hidden");
+  $("btnConfirmar").disabled = true;
+  $("btnConfirmar").title = "Elige el mes actual en el encabezado para crear tickets nuevos.";
+
+  const list = $("equiposList");
+  if (!list) return;
+  list.innerHTML = "<p class=\"muted\">Cargando tickets del mes…</p>";
+
+  const [y, mo] = state.vistaYM.split("-").map(Number);
+  try {
+    const res = await fetch(`/api/tickets-mes-vista?anio=${y}&mes=${mo}&modo_prueba=${state.modoP}`);
+    if (!res.ok) {
+      const err = await safeJson(res);
+      throw new Error(err?.detail || `Error del servidor (${res.status})`);
+    }
+    const raw = await res.json();
+    const tickets = raw.tickets_mes || [];
+    list.innerHTML = "";
+
+    const hint = document.createElement("p");
+    hint.className = "muted vista-mes-hint";
+    hint.textContent =
+      "Vista de otro mes: listado según GLPI (apertura en ese mes). " +
+      "Para cuota y creación de tickets nuevos, vuelve a «MES ACTUAL» desde el encabezado.";
+    list.appendChild(hint);
+
+    if (tickets.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.style.cssText = "text-align:center;padding:16px";
+      empty.textContent = "No hay tickets de mantenimiento preventivo abiertos en ese mes en GLPI.";
+      list.appendChild(empty);
+    } else {
+      const mm = mo;
+      appendSeccionYaCreados(
+        list,
+        tickets,
+        `YA CREADOS — ${MESES_LARGOS[mm].toUpperCase()} ${y} (${tickets.length})`,
+      );
+    }
+  } catch (e) {
+    list.innerHTML = "";
+    const errEl = document.createElement("p");
+    errEl.className = "muted";
+    errEl.textContent = `No se pudo cargar el mes: ${e.message}`;
+    list.appendChild(errEl);
+  }
+  refreshBadgeFromLastCargar();
+}
+
+function refreshRightPanel() {
+  updateMesHeaderLabel();
+  const cur = state.vistaYM === yMesNow();
+  if (!cur) {
+    renderVistaHistoricaAsync();
+    return;
+  }
+  if (!state.lastCargar) {
+    const list = $("equiposList");
+    if (list) {
+      list.innerHTML = "";
+      const m = document.createElement("p");
+      m.className = "muted";
+      m.style.cssText = "color:var(--muted);font-size:13px;padding:20px 0;text-align:center";
+      m.textContent = "Pulsa «Cargar equipos desde GLPI» para obtener la cuota y los pendientes del mes actual.";
+      list.appendChild(m);
+    }
+    $("cuotaStats")?.classList.add("hidden");
+    $("btnConfirmar").disabled = true;
+    $("btnConfirmar").title = "";
+    refreshBadgeFromLastCargar();
+    return;
+  }
+  paintMesActualFromCargarData(state.lastCargar);
+  refreshBadgeFromLastCargar();
 }
 
 // ── Equipo row editable ───────────────────────────────────────────
@@ -674,8 +823,7 @@ function renderResultado(data) {
 
   show("modalResult");
 
-  // Recargar badge
-  if (data.ok) {
+  if (data.ok && state.vistaYM === yMesNow()) {
     $("badgeDone").textContent = "✓ Tickets del mes ya creados";
   }
 }
@@ -1853,8 +2001,8 @@ function esc(str) {
 let _ckCtx = null;  // { ticket_id, nombre, computer_id, rowEl }
 let _ckItems = [];  // lista de items del servidor
 
-async function abrirChecklist({ ticket_id, nombre, computer_id = null, rowEl }) {
-  _ckCtx = { ticket_id, nombre, computer_id, rowEl };
+async function abrirChecklist({ ticket_id, nombre, computer_id = null, rowEl, state_mes_key = null }) {
+  _ckCtx = { ticket_id, nombre, computer_id, rowEl, state_mes_key };
 
   // Cargar checklist desde API (una sola vez, luego queda en _ckItems)
   if (_ckItems.length === 0) {
@@ -1984,6 +2132,7 @@ $("btnSubmitChecklist").addEventListener("click", async () => {
         items_ok,
         notas,
         modo_prueba: state.modoP,
+        state_mes_key: _ckCtx.state_mes_key || null,
       }),
     });
 

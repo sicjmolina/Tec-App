@@ -1,5 +1,6 @@
 import calendar as cal_module
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta
 
@@ -239,18 +240,82 @@ class MaintenanceUseCases:
         finally:
             g.logout()
         state = self.state_repo.load_state()
-        key = mes_key()
-        equipos = state.get(key, {}).get("equipos", [])
-        for eq in equipos:
-            if eq.get("nombre") == data.nombre:
-                eq["completado"] = True
-                eq["fecha_completado"] = hoy
-                break
-        if key in state:
-            state[key]["equipos"] = equipos
+
+        def _valid_mes_key(k: str) -> bool:
+            return bool(k and re.match(r"^\d{4}-\d{2}$", str(k)))
+
+        def _mark_in_key(key: str) -> bool:
+            if key not in state or not isinstance(state.get(key), dict):
+                return False
+            equipos = state[key].get("equipos") or []
+            for eq in equipos:
+                tid_ok = eq.get("ticket_id") is not None and str(eq.get("ticket_id")) == str(data.ticket_id)
+                if eq.get("nombre") == data.nombre or tid_ok:
+                    eq["completado"] = True
+                    eq["fecha_completado"] = hoy
+                    state[key]["equipos"] = equipos
+                    return True
+            return False
+
+        updated = False
+        if data.state_mes_key and _valid_mes_key(data.state_mes_key):
+            updated = _mark_in_key(data.state_mes_key)
+        if not updated:
+            updated = _mark_in_key(mes_key())
+        if not updated:
+            for key, block in list(state.items()):
+                if key == "_meta" or not isinstance(block, dict):
+                    continue
+                if not _valid_mes_key(str(key)):
+                    continue
+                if _mark_in_key(str(key)):
+                    updated = True
+                    break
+        if updated:
             merge_meta_into_state(state)
             self.state_repo.save_state(state)
         return {"ok": True, "ticket_cerrado": True, "fecha_actualizada": hoy if fecha_ok else None, "modo_prueba": False}
+
+    def tickets_mes_vista(self, year: int, month: int, modo_prueba: bool, glpi_factory):
+        if month < 1 or month > 12:
+            raise HTTPException(400, "El mes debe estar entre 1 y 12.")
+        if year < 2000 or year > 2100:
+            raise HTTPException(400, "Año no válido.")
+        if modo_prueba:
+            ult = cal_module.monthrange(year, month)[1]
+            dlim = min(25, ult)
+            return {
+                "anio": year,
+                "mes": month,
+                "tickets_mes": [
+                    {
+                        "id": 91001,
+                        "nombre": "PC-PRUEBA-MES",
+                        "status_id": 2,
+                        "status_txt": "En curso",
+                        "fecha_limite": f"{year}-{month:02d}-{dlim:02d}",
+                    },
+                    {
+                        "id": 91002,
+                        "nombre": "PC-PRUEBA-02",
+                        "status_id": 6,
+                        "status_txt": "Cerrado",
+                        "fecha_limite": f"{year}-{month:02d}-{min(18, ult):02d}",
+                    },
+                ],
+            }
+        cfg = get_merged_config()
+        if not cfg.get("glpi_url"):
+            raise HTTPException(400, "Configura la URL de GLPI primero.")
+        if _requests is None:
+            raise HTTPException(500, "Instala requests")
+        g = glpi_factory(cfg)
+        try:
+            g.login()
+            tickets = g.get_tickets_vista_mes(year, month)
+        finally:
+            g.logout()
+        return {"anio": year, "mes": month, "tickets_mes": tickets}
 
     def get_estado(self):
         state = self.state_repo.load_state()

@@ -47,8 +47,11 @@
   <!-- RIGHT: mes actual -->
   <section class="panel-right">
 
-    <div class="panel-header">
-      <span class="section-label" id="labelMesActual">MES ACTUAL</span>
+    <div class="panel-header mes-vista-header">
+      <button type="button" class="btn-mes-vista" id="btnMesVista" title="Elegir mes: ver tickets de ese mes y completar pendientes">
+        <span class="section-label" id="labelMesActual">MES ACTUAL</span>
+      </button>
+      <input type="month" id="inpVistaMes" class="inp-vista-mes" title="Seleccionar mes" aria-label="Mes a mostrar en la lista"/>
       <span class="badge-done" id="badgeDone"></span>
     </div>
 

@@ -172,6 +172,12 @@ def cargar_equipos(modo_prueba: bool = True):
     return maintenance_uc.cargar_equipos(modo_prueba, resolve_glpi)
 
 
+@router.get("/tickets-mes-vista")
+def tickets_mes_vista(anio: int, mes: int, modo_prueba: bool = False):
+    """Tickets de mantenimiento preventivo abiertos en el calendario indicado (cualquier estado)."""
+    return maintenance_uc.tickets_mes_vista(anio, mes, modo_prueba, resolve_glpi)
+
+
 @router.post("/confirmar")
 def confirmar(data: ConfirmarIn):
     return maintenance_uc.confirmar(data, resolve_glpi, resolve_outlook)
